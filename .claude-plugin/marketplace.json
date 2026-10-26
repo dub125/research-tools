@@ -1,0 +1,11 @@
+{
+  "name": "research-tools",
+  "owner": {
+    "name": "Dylan Wichman"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for research workflows",
+    "version": "0.1.0"
+  },
+  "plugins": []
+}
