@@ -7,5 +7,11 @@
     "description": "Claude Code plugins for research workflows",
     "version": "0.1.0"
   },
-  "plugins": []
+  "plugins": [
+    {
+      "name": "knowledge-track",
+      "source": "./plugins/knowledge-track",
+      "description": "Global inventory of what you know and how well"
+    }
+  ]
 }

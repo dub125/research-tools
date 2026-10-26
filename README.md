@@ -24,3 +24,8 @@ A Claude Code plugin marketplace for research workflows.
    ```
 
 3. Check it with `claude plugin validate .`
+
+## Plugins
+
+- [knowledge-track](plugins/knowledge-track/README.md): global inventory of what
+  you know and how well, with a 0-5 level and evidence per concept.
