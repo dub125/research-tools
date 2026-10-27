@@ -1,10 +1,10 @@
 {
   "slug": "kt-live-kb",
-  "text": "`~/.claude/knowledge` is in the v0.2 layout (concepts.jsonl + README.md + .git) since commit a154947 in that repo; it holds graph-neural-networks and message-passing, both level 2, tag gnn.",
+  "text": "`~/.claude/knowledge` is v0.2 + summary/part-of (commit 829ac71 there): graph-neural-networks and message-passing (part-of graph-neural-networks), both level 2 self-reported, tag gnn. A schema change that adds a required field breaks the live KB immediately, because kt on PATH is the working tree; backfill it in the same step.",
   "created_at": "2026-10-27T00:16:55.830299Z",
-  "updated_at": "2026-10-27T00:16:55.830299Z",
+  "updated_at": "2026-10-27T02:42:40.152535Z",
   "stamp": {
-    "commit": "f34c341",
+    "commit": "bb44bef",
     "branch": "dev"
   }
 }
