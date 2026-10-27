@@ -1,0 +1,28 @@
+{
+  "id": "research-tools-1b77b3",
+  "title": "Schema: add required summary and part-of to kt",
+  "body": "",
+  "type": "feature",
+  "status": "open",
+  "priority": 2,
+  "labels": [],
+  "parent": "research-tools-55c5ed",
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-10-27T02:39:43.225963Z",
+  "updated_at": "2026-10-27T02:39:43.225963Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "f34c341",
+      "branch": "dev"
+    },
+    "closed": null
+  }
+}
