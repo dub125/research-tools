@@ -1,0 +1,10 @@
+{
+  "slug": "kt-observe-installed",
+  "text": "Observation logging (dev/kt-observe) is installed in user scope since 2026-10-26: hooks in ~/.claude/settings.json run `python3 <repo>/dev/kt-observe/observe.py`, /kt-flag is a symlink in ~/.claude/commands. Log at ~/.claude/knowledge-track-log/ (events.jsonl + sessions/ transcript copies). Remove with `python3 dev/kt-observe/install.py --uninstall`. Moving or renaming the repo breaks the hooks silently.",
+  "created_at": "2026-10-27T02:50:05.436156Z",
+  "updated_at": "2026-10-27T02:50:05.436156Z",
+  "stamp": {
+    "commit": "05ac9d4",
+    "branch": "dev"
+  }
+}
