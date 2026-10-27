@@ -7,13 +7,15 @@
   "priority": 2,
   "labels": [],
   "parent": null,
-  "blocked_by": [],
+  "blocked_by": [
+    "research-tools-55c5ed"
+  ],
   "related": [],
   "assignee": null,
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-10-27T00:13:54.104594Z",
-  "updated_at": "2026-10-27T00:18:07.271821Z",
+  "updated_at": "2026-10-27T00:18:07.509299Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
