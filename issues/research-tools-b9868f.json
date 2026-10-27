@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-b9868f",
+  "title": "Decide whether levels decay over time",
+  "body": "SPEC.md: if decay is added, compute it at read time from `updated` and never store it.",
+  "type": "decision",
+  "status": "open",
+  "priority": 4,
+  "labels": [
+    "knowledge-track"
+  ],
+  "parent": "research-tools-55c5ed",
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-10-27T00:13:55.979375Z",
+  "updated_at": "2026-10-27T00:13:55.979375Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "410635f",
+      "branch": "dev"
+    },
+    "closed": null
+  }
+}
