@@ -15,11 +15,20 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-10-27T00:13:55.444083Z",
-  "updated_at": "2026-10-27T00:13:55.444083Z",
+  "updated_at": "2026-10-27T00:23:33.961515Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
-  "notes": [],
+  "notes": [
+    {
+      "id": "c4f4bc43",
+      "at": "2026-10-27T00:23:33.961514Z",
+      "author": "Dylan Wichman/5e2bceba",
+      "text": "Decided (Dylan, 2026-10-26): knowledge is atomic. A record like 'understands GNNs' is too coarse to gate on. Fields (GNNs) are tags, not leveled concepts. Brainstorm context: levels exist to gate experiment design; each design marks concepts load-bearing / operational / incidental with a required level; a gap is resolved by learn / substitute / accept-gap (an override never changes a level); Claude explaining is not evidence; note records the source (self-report vs explained back). Still open: atom definition, lazy creation, what to do with the existing graph-neural-networks record.",
+      "commit": "f34c341",
+      "branch": "dev"
+    }
+  ],
   "stamps": {
     "created": {
       "commit": "410635f",
