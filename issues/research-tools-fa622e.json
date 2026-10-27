@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-fa622e",
+  "title": "Add version to knowledge-track plugin.json",
+  "body": "`claude plugin validate .` warns: `plugins[0] plugin.json -> version: No version specified`. The commits call it v0.2; set `\"version\": \"0.2.0\"`. The marketplace metadata says 0.1.0, so update that too.",
+  "type": "chore",
+  "status": "open",
+  "priority": 3,
+  "labels": [
+    "knowledge-track"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-10-27T00:13:54.644338Z",
+  "updated_at": "2026-10-27T00:13:54.644338Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "410635f",
+      "branch": "dev"
+    },
+    "closed": null
+  }
+}
