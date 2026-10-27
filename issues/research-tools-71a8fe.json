@@ -1,0 +1,28 @@
+{
+  "id": "research-tools-71a8fe",
+  "title": "Publish dev: merge knowledge-track v0.1/v0.2 into main and push",
+  "body": "origin has only `main` at the scaffold commit (c8d9c69). `dev` carries the two knowledge-track commits (36b9bb2, 410635f) and has never been pushed. The `refs/foam/data` ref is not on origin either, so `foam sync` is needed for other clones to see issues.",
+  "type": "chore",
+  "status": "open",
+  "priority": 2,
+  "labels": [],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-10-27T00:13:54.104594Z",
+  "updated_at": "2026-10-27T00:13:54.104594Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "410635f",
+      "branch": "dev"
+    },
+    "closed": null
+  }
+}
