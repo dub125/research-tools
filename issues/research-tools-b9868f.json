@@ -15,11 +15,20 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-10-27T00:13:55.979375Z",
-  "updated_at": "2026-10-27T00:13:55.979375Z",
+  "updated_at": "2026-10-27T02:47:01.354647Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
-  "notes": [],
+  "notes": [
+    {
+      "id": "f6b1e371",
+      "at": "2026-10-27T02:47:01.354646Z",
+      "author": "Dylan Wichman/5e2bceba",
+      "text": "Related decision already in SPEC: a level is never lowered for lack of use. Decay, if added, would be a read-time adjustment and would need to square with that.",
+      "commit": "1212b78",
+      "branch": "dev"
+    }
+  ],
   "stamps": {
     "created": {
       "commit": "410635f",
