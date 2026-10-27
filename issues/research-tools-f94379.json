@@ -3,7 +3,7 @@
   "title": "Passive mode: level inference rules + SessionStart trigger (plugin, always on)",
   "body": "",
   "type": "feature",
-  "status": "in_progress",
+  "status": "closed",
   "priority": 2,
   "labels": [],
   "parent": "research-tools-55c5ed",
@@ -13,13 +13,13 @@
   ],
   "related": [],
   "assignee": "Dylan Wichman/5e2bceba",
-  "lease_expires": "2026-10-27T03:00:33.378643Z",
+  "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-10-27T02:39:43.506546Z",
-  "updated_at": "2026-10-27T02:45:33.695482Z",
-  "closed_at": null,
-  "close_reason": null,
-  "resolution": null,
+  "updated_at": "2026-10-27T02:46:55.833343Z",
+  "closed_at": "2026-10-27T02:46:55.833343Z",
+  "close_reason": "Assigning levels in SPEC + skill, SessionStart hook in plugin (hooks/hooks.json + session-start.md). Verified headless (sonnet, scratch KB): hook fired, skill loaded, 4 concepts recorded at level 1 with evidence notes and a one-line announcement.",
+  "resolution": "done",
   "notes": [
     {
       "id": "c1dd977d",
@@ -43,6 +43,9 @@
       "commit": "f34c341",
       "branch": "dev"
     },
-    "closed": null
+    "closed": {
+      "commit": "1212b78",
+      "branch": "dev"
+    }
   }
 }
