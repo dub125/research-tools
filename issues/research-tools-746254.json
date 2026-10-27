@@ -15,7 +15,7 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-10-27T02:39:43.781082Z",
-  "updated_at": "2026-10-27T02:39:52.933465Z",
+  "updated_at": "2026-10-27T02:46:56.148664Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
@@ -26,6 +26,14 @@
       "author": "Dylan Wichman/5e2bceba",
       "text": "Logging is test-only: scripts in dev/, hooks registered in ~/.claude/settings.json, log in ~/.claude/knowledge-track-log/. Events: kt writes (prompt, command, before/after, project, session, KB commit), kt lookups (exact/fuzzy/miss), kt refusals, SessionEnd summary + transcript copy (transcripts are deleted after 30 days by default), /kt-flag manual notes.",
       "commit": "f34c341",
+      "branch": "dev"
+    },
+    {
+      "id": "3f1cb914",
+      "at": "2026-10-27T02:46:56.148663Z",
+      "author": "Dylan Wichman/5e2bceba",
+      "text": "Baseline from the e2e test (sonnet, one MSM/TICA prompt): rules mostly followed. Misses: tica not linked part-of msm despite the reference example; msm summary names its parts (transition counts), against test 2; the one-step cap kept implied-timescales at 1 although the user justified a lag choice from it (rule says 2), so the cap may be too slow. Watch for these in the logs. Headless runs need --allowedTools Skill or the skill silently fails to load.",
+      "commit": "1212b78",
       "branch": "dev"
     }
   ],
