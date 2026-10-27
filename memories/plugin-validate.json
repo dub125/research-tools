@@ -1,0 +1,10 @@
+{
+  "slug": "plugin-validate",
+  "text": "`claude plugin validate .` from the repo root checks marketplace.json and every plugin.json. At 410635f it passes, with one warning: knowledge-track has no `version`.",
+  "created_at": "2026-10-27T00:14:04.03318Z",
+  "updated_at": "2026-10-27T00:14:04.03318Z",
+  "stamp": {
+    "commit": "410635f",
+    "branch": "dev"
+  }
+}
