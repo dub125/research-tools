@@ -1,0 +1,10 @@
+{
+  "slug": "kt-v01-history",
+  "text": "knowledge-track v0.1 (36b9bb2) stored one Markdown file per concept with YAML front matter, a 0-4 level scale, `kind`, `part-of` and an `evidence` list. v0.2 (410635f) replaced all of that with a single `concepts.jsonl`, a 0-3 scale, and a free-text `note`. `git show 36b9bb2:plugins/knowledge-track/SPEC.md` has the old format.",
+  "created_at": "2026-10-27T00:14:03.763156Z",
+  "updated_at": "2026-10-27T00:14:03.763156Z",
+  "stamp": {
+    "commit": "410635f",
+    "branch": "dev"
+  }
+}
