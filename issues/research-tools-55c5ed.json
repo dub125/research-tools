@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-55c5ed",
+  "title": "knowledge-track: policy layer (the items SPEC.md leaves undecided)",
+  "body": "SPEC.md lists these under \"Deliberately not decided yet\". v0.2 records state only, and SKILL.md tells Claude not to invent a policy. Each child is one open design question.",
+  "type": "milestone",
+  "status": "open",
+  "priority": 3,
+  "labels": [
+    "knowledge-track"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-10-27T00:13:55.17496Z",
+  "updated_at": "2026-10-27T00:13:55.17496Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "410635f",
+      "branch": "dev"
+    },
+    "closed": null
+  }
+}
