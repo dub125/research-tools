@@ -1,10 +1,10 @@
 {
   "slug": "plugin-validate",
-  "text": "`claude plugin validate .` from the repo root checks marketplace.json and every plugin.json. At 410635f it passes, with one warning: knowledge-track has no `version`.",
+  "text": "`claude plugin validate .` from the repo root checks marketplace.json and every plugin.json. At f34c341 it passes with no warnings (knowledge-track has version 0.2.0).",
   "created_at": "2026-10-27T00:14:04.03318Z",
-  "updated_at": "2026-10-27T00:14:04.03318Z",
+  "updated_at": "2026-10-27T00:16:55.561754Z",
   "stamp": {
-    "commit": "410635f",
+    "commit": "f34c341",
     "branch": "dev"
   }
 }
