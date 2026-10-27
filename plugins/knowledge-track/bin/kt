@@ -25,14 +25,17 @@ from pathlib import Path
 FIELDS = {
     "id": (str, None),
     "name": (str, None),
+    "summary": (str, None),
     "level": (int, None),
     "aliases": (list, []),
     "tags": (list, []),
     "requires": (list, []),
+    "part-of": (list, []),
     "note": (str, ""),
     "updated": (str, None),
 }
-REQUIRED = ["id", "name", "level", "updated"]
+REQUIRED = ["id", "name", "summary", "level", "updated"]
+LINK_FIELDS = ["requires", "part-of"]  # id lists that must resolve and stay acyclic
 LIST_FIELDS = [k for k, (t, _) in FIELDS.items() if t is list]
 LEVELS = {0: "unknown", 1: "heard-of", 2: "understands", 3: "can-use"}
 
@@ -155,27 +158,32 @@ class KB:
                     err("%s items must be non-empty strings" % k)
                 elif len(set(v)) != len(v):
                     err("%s has duplicates" % k)
-            for r in c.get("requires") or []:
-                if r == cid:
-                    err("requires itself")
-                elif r not in self.concepts:
-                    err("requires unknown id %r" % r)
+            for k in LINK_FIELDS:
+                for r in c.get(k) or []:
+                    if r == cid:
+                        err("%s itself" % k)
+                    elif r not in self.concepts:
+                        err("%s unknown id %r" % (k, r))
+            both = set(c.get("requires") or []) & set(c.get("part-of") or [])
+            if both:
+                err("in both requires and part-of: %s (a part is not a prerequisite)" % ", ".join(sorted(both)))
             if isinstance(c.get("name"), str) and isinstance(c.get("aliases"), list):
                 for n in names_of(c):
                     other = owner.setdefault(n, cid)
                     if other != cid:
                         err("name/alias %r already belongs to %s" % (n, other))
-        cycle = self.find_cycle()
-        if cycle:
-            errors.append("requires cycle: %s" % " -> ".join(cycle))
+        for k in LINK_FIELDS:
+            cycle = self.find_cycle(k)
+            if cycle:
+                errors.append("%s cycle: %s" % (k, " -> ".join(cycle)))
         return errors
 
-    def find_cycle(self):
+    def find_cycle(self, field="requires"):
         state = {}
 
         def visit(cid, path):
             state[cid] = 1
-            for r in self.concepts[cid].get("requires") or []:
+            for r in self.concepts[cid].get(field) or []:
                 if r not in self.concepts:
                     continue
                 if state.get(r) == 1:
@@ -241,6 +249,9 @@ class KB:
 
     def required_by(self, cid):
         return sorted(k for k, c in self.concepts.items() if cid in c["requires"])
+
+    def parts(self, cid):
+        return sorted(k for k, c in self.concepts.items() if cid in c["part-of"])
 
     def gaps(self, cid, threshold):
         """Transitive prerequisites of cid with level below threshold."""
@@ -341,6 +352,8 @@ def cmd_set(args):
             raise KtError("id must be lowercase kebab-case")
         if args.level is None:
             raise KtError("new concept needs --level")
+        if not (args.summary or "").strip():
+            raise KtError("new concept needs --summary (one line: what it is, as a black box)")
         name = args.name or cid.replace("-", " ")
         if not args.new:
             probe = {"id": cid, "name": name, "aliases": split_list(args.alias)}
@@ -364,11 +377,14 @@ def cmd_set(args):
         c[k] = []
     if args.name is not None:
         c["name"] = args.name
+    if args.summary is not None:
+        c["summary"] = args.summary.strip()
     if args.level is not None:
         c["level"] = args.level
     if args.note is not None:
         c["note"] = args.note
-    for k, values in (("aliases", args.alias), ("tags", args.tag), ("requires", args.requires)):
+    for k, values in (("aliases", args.alias), ("tags", args.tag), ("requires", args.requires),
+                      ("part-of", args.part_of)):
         for v in split_list(values):
             if v not in c[k]:
                 c[k].append(v)
@@ -381,9 +397,12 @@ def cmd_get(args):
     kb = KB(kb_dir()).load()
     c = kb.get(args.id)
     out = dict(c, level_name=LEVELS[c["level"]], required_by=kb.required_by(c["id"]),
+               parts=kb.parts(c["id"]),
                gaps=kb.gaps(c["id"], args.threshold))
     lines = [row(c)]
-    for k in ("aliases", "tags", "requires", "required_by", "gaps"):
+    if c["summary"]:
+        lines.append("  %-12s %s" % ("summary", c["summary"]))
+    for k in ("aliases", "tags", "requires", "required_by", "part-of", "parts", "gaps"):
         if out[k]:
             lines.append("  %-12s %s" % (k, ", ".join(out[k])))
     if c["note"]:
@@ -440,15 +459,17 @@ def cmd_merge(args):
         if norm(a) not in names_of(dst) and a not in dst["aliases"]:
             dst["aliases"].append(a)
     dst["tags"] += [t for t in src["tags"] if t not in dst["tags"]]
-    dst["requires"] += [r for r in src["requires"] if r not in dst["requires"] and r != dst["id"]]
+    for k in LINK_FIELDS:
+        dst[k] += [r for r in src[k] if r not in dst[k] and r != dst["id"]]
     if src["level"] > dst["level"]:
         dst["level"], dst["note"] = src["level"], src["note"]
     for c in kb.concepts.values():
-        if src["id"] in c["requires"]:
-            c["requires"] = [r for r in c["requires"] if r != src["id"]]
-            if dst["id"] not in c["requires"] and c["id"] != dst["id"]:
-                c["requires"].append(dst["id"])
-            c["updated"] = today()
+        for k in LINK_FIELDS:
+            if src["id"] in c[k]:
+                c[k] = [r for r in c[k] if r != src["id"]]
+                if dst["id"] not in c[k] and c["id"] != dst["id"]:
+                    c[k].append(dst["id"])
+                c["updated"] = today()
     dst["updated"] = today()
     committed = kb.save("kt: merge %s into %s" % (src["id"], dst["id"]))
     print("merged %s into %s%s" % (src["id"], dst["id"], " (committed)" if committed else ""))
@@ -490,13 +511,15 @@ def cmd_dupes(args):
 def cmd_rm(args):
     kb = KB(kb_dir()).load()
     kb.get(args.id)
-    users = kb.required_by(args.id)
-    if users and not args.force:
-        raise KtError("%s is required by %s (use --force to drop those links)" % (args.id, ", ".join(users)))
+    users = {"required by": kb.required_by(args.id), "a part of": kb.parts(args.id)}
+    used = ["%s %s" % (how, ", ".join(ids)) for how, ids in users.items() if ids]
+    if used and not args.force:
+        raise KtError("%s is %s (use --force to drop those links)" % (args.id, "; ".join(used)))
     del kb.concepts[args.id]
-    for u in users:
-        kb.concepts[u]["requires"].remove(args.id)
-        kb.concepts[u]["updated"] = today()
+    for k, ids in zip(LINK_FIELDS, users.values()):
+        for u in ids:
+            kb.concepts[u][k].remove(args.id)
+            kb.concepts[u]["updated"] = today()
     committed = kb.save("kt: rm %s" % args.id)
     print("removed %s%s" % (args.id, " (committed)" if committed else ""))
 
@@ -530,10 +553,12 @@ def build_parser():
     sp.add_argument("id")
     sp.add_argument("--name")
     sp.add_argument("--level", type=int, choices=sorted(LEVELS))
+    sp.add_argument("--summary", help="one line: what it is, as a black box (required)")
     sp.add_argument("--note", help="why the level is what it is")
     sp.add_argument("--alias", action="append")
     sp.add_argument("--tag", action="append")
-    sp.add_argument("--requires", action="append")
+    sp.add_argument("--requires", action="append", help="prerequisite ids")
+    sp.add_argument("--part-of", dest="part_of", action="append", help="ids of concepts this is a component of (not a prerequisite)")
     sp.add_argument("--clear", action="append", metavar="FIELD", help="empty a list field before appending")
     sp.add_argument("--new", action="store_true", help="create even if a similar concept exists")
 

@@ -32,19 +32,26 @@ fine, but `kt` output is shorter. Full schema: `SPEC.md` in the plugin directory
 - **Every level of 1 or more needs a `--note`** saying what you observed or what
   the user said, e.g. "implemented GCN layer in gnn/main.py". Do not raise a
   level without something to put there.
-- Split a concept when the user could know one part well and another not at all.
-  Group with `--tag`. Record prerequisites with `--requires`.
+- **Before creating a concept, apply the Concept rules in `SPEC.md`**: an
+  established name, a black-box `--summary` that names no parts, `--part-of`
+  for components vs `--requires` for prerequisites, only on demand, and
+  separate concepts for internals rather than stretching a parent's level.
+  Compare against the MSM/TPT reference example there. Fields of study are
+  `--tag`s, not concepts.
+- After adding concepts, tell the user in one line, e.g. "added `committor`
+  (part of `tpt`)". Do not ask for approval.
 
 ## Commands
 
 - `kt check <term>...`: one line per term: level, how it matched, or up to 3
   `maybe:` candidates.
-- `kt get <id>`: full record, plus `required_by` and `gaps` (prerequisites
-  below level 2).
+- `kt get <id>`: full record, plus `required_by`, `parts` and `gaps`
+  (prerequisites below level 2).
 - `kt list [--level '<2'] [--tag T] [--all]`
 - `kt gaps <id> [--threshold N]`: transitive prerequisites below N (default 2).
-- `kt set <id> [--level N] [--note ..] [--name ..] [--alias A] [--tag T] [--requires a,b] [--clear FIELD] [--new]`:
-  creates or updates. List flags append; `--clear tags` empties a list first.
+- `kt set <id> [--summary ..] [--level N] [--note ..] [--name ..] [--alias A] [--tag T] [--requires a,b] [--part-of a,b] [--clear FIELD] [--new]`:
+  creates or updates; `--summary` is required on create. List flags append;
+  `--clear tags` empties a list first.
   On create it refuses if a similar concept exists; use `--new` only if it is
   genuinely different.
 - `kt merge <src> <dst>`: fold a duplicate into another. Its names become
