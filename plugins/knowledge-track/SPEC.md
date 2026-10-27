@@ -171,9 +171,39 @@ Errors block writes:
 - Missing or empty `summary`.
 - Two concepts sharing a normalised id, name or alias.
 
+## Assigning levels
+
+Claude records levels passively, in every session, from what it observes
+while working. It does not ask the user for approval or interrupt the work to
+do it. A SessionStart hook in the plugin reminds Claude to watch for evidence.
+
+Only concepts that matter to the current work are recorded. Plumbing (a
+plotting library, a file format) is not.
+
+| Observation | Level |
+|---|---|
+| The user asks what X is or says they don't know it | 0 |
+| The user names X in an instruction ("use TICA") or mentions it in passing | at least 1 |
+| The user explains X correctly, catches a misuse of X, or makes a choice about X that takes understanding (picking a lag time and saying why) | 2 |
+| The user uses X correctly in their own code or analysis, or debugs it when it breaks | 3 |
+| The user states their own level ("I know MSMs well") | the stated level |
+| The user says something wrong about X | one lower |
+| Claude explains X and the user acknowledges it | no change |
+| Code Claude wrote that the user ran | no change |
+
+- A single observation raises a level by at most one step above its current
+  value (an untracked concept counts as 0). Self-reports are the exception
+  and are taken as stated.
+- No evidence is not evidence: a level is never lowered for lack of use.
+- A parent's level is never inferred from its parts, or the reverse.
+- The `note` records the evidence, not the conclusion, with the date and
+  where it happened: "2026-10-26 chose 10 ns lag from implied-timescale
+  plateau (msm/analysis.ipynb)", not "understands MSMs". Self-reports say
+  "self-reported".
+
 ## Deliberately not decided yet
 
-- How levels get assigned or changed, and who may change them.
-- When Claude consults the knowledge base or prompts the user (gating).
+- When Claude consults the knowledge base or prompts the user before acting
+  (gating).
 - Decay of levels over time (if added, compute it at read time from `updated`).
 - Any learning loop.

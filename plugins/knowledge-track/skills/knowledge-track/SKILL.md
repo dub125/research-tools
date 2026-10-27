@@ -1,6 +1,6 @@
 ---
 name: knowledge-track
-description: Use when you need to record, look up, or reason about what the user knows (concepts, methods, tools, theories, how well they know them, prerequisites).
+description: Use when the user shows what they know or don't know about a method, tool, theory or concept (naming it, asking about it, explaining or using it, getting it wrong), or when you need to look up or reason about what the user knows.
 allowed-tools: Bash(kt *)
 ---
 
@@ -60,8 +60,26 @@ fine, but `kt` output is shorter. Full schema: `SPEC.md` in the plugin directory
 - `kt rm <id> [--force]`, `kt validate`, `kt init`
 - Add `--json` to read commands when you need to parse output.
 
+## Passive recording
+
+Record levels from what you observe while working, without asking and without
+interrupting the work. Only concepts that matter to the work; skip plumbing.
+The full rules are under "Assigning levels" in `SPEC.md`:
+
+- asks what X is, or says they don't know it: 0
+- names X in an instruction or in passing: at least 1
+- explains X correctly, catches a misuse, or makes a choice that takes
+  understanding: 2
+- uses X correctly in their own code or analysis, or debugs it: 3
+- states their own level: take it as stated, note "self-reported"
+- says something wrong about X: one lower, note quotes it
+- you explained it and they acknowledged, or they ran code you wrote: no change
+
+One observation raises a level by at most one step (untracked counts as 0),
+except self-reports. Never lower for lack of use. Notes record the evidence
+with date and place, not the conclusion.
+
 ## Scope of this version
 
-This version records state only. No policy exists yet for when to ask the user
-about a concept or how to assign levels. Do not invent one: record what the user
-tells you or what you observe, and put the basis in the note.
+No policy exists yet for gating: when to check the knowledge base or ask the
+user before designing or running something. Do not invent one.
