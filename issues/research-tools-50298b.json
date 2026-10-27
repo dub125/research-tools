@@ -3,7 +3,7 @@
   "title": "Decide how levels are assigned or changed, and who may change them",
   "body": "",
   "type": "decision",
-  "status": "open",
+  "status": "closed",
   "priority": 3,
   "labels": [
     "knowledge-track"
@@ -15,10 +15,10 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-10-27T00:13:55.444083Z",
-  "updated_at": "2026-10-27T02:32:22.887984Z",
-  "closed_at": null,
-  "close_reason": null,
-  "resolution": null,
+  "updated_at": "2026-10-27T02:47:01.042026Z",
+  "closed_at": "2026-10-27T02:47:01.042026Z",
+  "close_reason": "Decided and implemented: Claude assigns levels passively from observed evidence (SPEC 'Assigning levels'), may lower on a wrong statement, self-reports at face value, no user approval. Concept structure automatic under SPEC 'Concept rules'.",
+  "resolution": "done",
   "notes": [
     {
       "id": "c4f4bc43",
@@ -42,6 +42,9 @@
       "commit": "410635f",
       "branch": "dev"
     },
-    "closed": null
+    "closed": {
+      "commit": "1212b78",
+      "branch": "dev"
+    }
   }
 }
