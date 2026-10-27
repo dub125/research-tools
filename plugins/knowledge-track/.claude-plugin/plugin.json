@@ -1,6 +1,6 @@
 {
   "name": "knowledge-track",
-  "description": "Global inventory of what you know and how well: concepts, methods, tools, theories, with a 0-5 level and evidence.",
+  "description": "Global inventory of what you know and how well: concepts, methods, tools, theories, with a 0-3 level and a note on why.",
   "author": {
     "name": "Dylan Wichman"
   }

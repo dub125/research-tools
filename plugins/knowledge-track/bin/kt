@@ -2,10 +2,10 @@
 """kt: the knowledge-track CLI.
 
 Single writer for the knowledge base at ~/.claude/knowledge (override with
-KNOWLEDGE_TRACK_DIR). One atomic concept per markdown file with restricted
-YAML frontmatter. See SPEC.md next to this script's plugin for the schema.
+KNOWLEDGE_TRACK_DIR): one JSON object per line in concepts.jsonl, sorted by id.
+See SPEC.md in this plugin for the schema.
 
-Python 3 stdlib only. No network access except `kt remote` and `kt sync`.
+Python 3 stdlib only. Never touches the network; push with git directly.
 """
 
 import argparse
@@ -20,1325 +20,567 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- schema ---
 
-KEY_ORDER = [
-    "id", "title", "kind", "level", "last_evidenced",
-    "aliases", "tags", "requires", "part-of", "related", "contrasts-with",
-    "evidence", "misconceptions", "created", "updated",
-]
-SCALAR_KEYS = {"id", "title", "kind", "level", "last_evidenced", "created", "updated"}
-LIST_KEYS = {"aliases", "tags", "requires", "part-of", "related", "contrasts-with",
-             "evidence", "misconceptions"}
-ID_LIST_KEYS = ["requires", "part-of", "related", "contrasts-with"]
-DAG_RELATIONS = ["requires", "part-of"]
-SYMMETRIC_RELATIONS = ["related", "contrasts-with"]
-BLOCK_LIST_KEYS = {"evidence", "misconceptions"}
-REQUIRED_KEYS = ["id", "title", "kind", "level", "created", "updated"]
-MANAGED_KEYS = {"id", "created", "updated", "last_evidenced"}
-KINDS = ["concept", "method", "tool", "theory"]
-EVIDENCE_KINDS = ["self", "exposed", "explained-back", "observed", "quiz", "taught"]
-LEVEL_NAMES = {0: "unknown", 1: "aware", 2: "explain", 3: "apply", 4: "connect", 5: "create"}
+# name -> (type, default). Order is the serialisation order. Adding a field is
+# one line here; records without it read as the default.
+FIELDS = {
+    "id": (str, None),
+    "name": (str, None),
+    "level": (int, None),
+    "aliases": (list, []),
+    "tags": (list, []),
+    "requires": (list, []),
+    "note": (str, ""),
+    "updated": (str, None),
+}
+REQUIRED = ["id", "name", "level", "updated"]
+LIST_FIELDS = [k for k, (t, _) in FIELDS.items() if t is list]
+LEVELS = {0: "unknown", 1: "heard-of", 2: "understands", 3: "can-use"}
 
 ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-EVIDENCE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}) (" + "|".join(EVIDENCE_KINDS) + r"): .+$")
-CONFLICT_RE = re.compile(r"^(<{7} |={7}$|>{7} )")
 
-DEFAULT_CONFIG = {"auto_commit": True, "auto_sync": False}
+DATA_FILE = "concepts.jsonl"
+SIMILAR_CUTOFF = 0.75   # `set` refuses to create a concept this close to an existing one
+CANDIDATE_CUTOFF = 0.6  # `check` lists fuzzy candidates at or above this
+LIST_LIMIT = 50
 
 
 class KtError(Exception):
-    """A user-facing error. Message is printed, exit code 1."""
+    pass
 
-
-# ----------------------------------------------------------- frontmatter ---
-
-def _parse_quoted(s, i):
-    """Parse a quoted scalar starting at s[i] (a quote char). Return (value, next_i)."""
-    q = s[i]
-    i += 1
-    out = []
-    while i < len(s):
-        c = s[i]
-        if q == '"' and c == "\\" and i + 1 < len(s):
-            nxt = s[i + 1]
-            out.append({"n": "\n", "t": "\t"}.get(nxt, nxt))
-            i += 2
-            continue
-        if q == "'" and c == "'" and i + 1 < len(s) and s[i + 1] == "'":
-            out.append("'")
-            i += 2
-            continue
-        if c == q:
-            return "".join(out), i + 1
-        out.append(c)
-        i += 1
-    raise ValueError("unterminated quoted string")
-
-
-def _parse_scalar(raw):
-    """Parse one scalar value: quoted (with trailing comment allowed) or bare."""
-    raw = raw.strip()
-    if raw == "":
-        return ""
-    if raw[0] in "\"'":
-        val, i = _parse_quoted(raw, 0)
-        rest = raw[i:].strip()
-        if rest and not rest.startswith("#"):
-            raise ValueError("trailing text after quoted string: %r" % rest)
-        return val
-    if raw[0] in "|>":
-        raise ValueError("multi-line scalars (| and >) are not supported")
-    if raw[0] in "{":
-        raise ValueError("nested mappings are not supported")
-    if raw.startswith("#"):
-        return ""
-    m = re.search(r"\s#", raw)
-    if m:
-        raw = raw[:m.start()].rstrip()
-    return raw
-
-
-def _parse_flow_list(raw):
-    """Parse `[a, b, "c d"]`. Items may be quoted. Returns list of str."""
-    raw = raw.strip()
-    m = re.search(r"\]\s*(#.*)?$", raw)
-    if not m:
-        raise ValueError("unterminated flow list")
-    inner = raw[1:m.start()]
-    items = []
-    i = 0
-    n = len(inner)
-    while True:
-        while i < n and inner[i] in " \t":
-            i += 1
-        if i >= n:
-            break
-        if inner[i] in "\"'":
-            val, i = _parse_quoted(inner, i)
-            while i < n and inner[i] in " \t":
-                i += 1
-            if i < n and inner[i] != ",":
-                raise ValueError("expected comma after quoted item in flow list")
-        else:
-            j = inner.find(",", i)
-            if j < 0:
-                j = n
-            val = inner[i:j].strip()
-            if val.startswith("[") or val.startswith("{"):
-                raise ValueError("nested collections are not supported")
-            i = j
-        items.append(val)
-        if i < n and inner[i] == ",":
-            i += 1
-            if i >= n:
-                break  # trailing comma
-    return [x for x in items if x != ""]
-
-
-def parse_frontmatter(text):
-    """Return (frontmatter dict, body str). Raises ValueError on grammar errors.
-
-    Grammar: `key: scalar`, `key: [a, b]`, or `key:` followed by `  - item`
-    lines. Keys are bare. No nesting, no multi-line scalars.
-    """
-    for ln, line in enumerate(text.split("\n"), 1):
-        if CONFLICT_RE.match(line):
-            raise ValueError("line %d: git conflict marker found; resolve the merge first" % ln)
-    if not text.startswith("---\n"):
-        raise ValueError("file must start with a '---' frontmatter line")
-    lines = text.split("\n")
-    end = None
-    for idx in range(1, len(lines)):
-        if lines[idx] == "---":
-            end = idx
-            break
-    if end is None:
-        raise ValueError("frontmatter is not closed with a '---' line")
-    fm = {}
-    order = []
-    i = 1
-    while i < end:
-        line = lines[i]
-        ln = i + 1
-        if line.strip() == "" or line.lstrip().startswith("#"):
-            i += 1
-            continue
-        if line[0] in " \t":
-            raise ValueError("line %d: unexpected indentation (nesting is not supported)" % ln)
-        m = re.match(r"^([A-Za-z0-9_-]+):(?:\s+(.*))?$", line)
-        if not m:
-            raise ValueError("line %d: expected 'key: value'" % ln)
-        key, raw = m.group(1), m.group(2)
-        if key in fm:
-            raise ValueError("line %d: duplicate key %r" % (ln, key))
-        raw = (raw or "").strip()
-        if raw.startswith("#"):
-            raw = ""
-        if raw == "":
-            # possible block list
-            items = []
-            j = i + 1
-            saw_item = False
-            while j < end:
-                nxt = lines[j]
-                if nxt.strip() == "":
-                    j += 1
-                    continue
-                im = re.match(r"^\s*-\s+(.*)$", nxt)
-                if im and nxt[0] in " \t-":
-                    item_raw = im.group(1).strip()
-                    if re.match(r"^[A-Za-z0-9_-]+:(\s|$)", item_raw) and not item_raw[0] in "\"'":
-                        raise ValueError("line %d: nested mappings are not supported" % (j + 1))
-                    if item_raw.startswith("-") and im.group(1).startswith("- "):
-                        raise ValueError("line %d: nested lists are not supported" % (j + 1))
-                    items.append(_parse_scalar(item_raw))
-                    saw_item = True
-                    j += 1
-                    continue
-                if nxt[0] in " \t":
-                    raise ValueError("line %d: unexpected indentation (nesting is not supported)" % (j + 1))
-                break
-            if saw_item:
-                fm[key] = items
-                order.append(key)
-                i = j
-                continue
-            fm[key] = [] if key in LIST_KEYS else ""
-            order.append(key)
-            i += 1
-            continue
-        if raw.startswith("["):
-            fm[key] = _parse_flow_list(raw)
-        else:
-            try:
-                fm[key] = _parse_scalar(raw)
-            except ValueError as e:
-                raise ValueError("line %d: %s" % (ln, e))
-        order.append(key)
-        i += 1
-    body = "\n".join(lines[end + 1:])
-    if "level" in fm and isinstance(fm["level"], str) and re.match(r"^-?\d+$", fm["level"]):
-        fm["level"] = int(fm["level"])
-    return fm, body
-
-
-_BARE_SAFE_RE = re.compile(r"^[A-Za-z0-9_][^#\[\]{}\"'`,]*$")
-
-
-def _needs_quote(s, in_flow=False):
-    if s == "" or s != s.strip():
-        return True
-    if s[0] in "-?:,[]{}#&*!|>'\"%@`":
-        return True
-    if ": " in s or s.endswith(":") or " #" in s or "\t" in s or "\n" in s:
-        return True
-    if in_flow and ("," in s or "[" in s or "]" in s or "\"" in s or "'" in s):
-        return True
-    if s.lower() in ("true", "false", "null", "yes", "no", "~", "on", "off"):
-        return True
-    if re.match(r"^[-+]?(\d[\d_]*(\.\d*)?|\.\d+)([eE][-+]?\d+)?$", s):
-        return True
-    return False
-
-
-def _quote(s):
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t") + '"'
-
-
-def _emit_scalar(s, in_flow=False):
-    if isinstance(s, int):
-        return str(s)
-    s = str(s)
-    return _quote(s) if _needs_quote(s, in_flow) else s
-
-
-def serialize_frontmatter(fm, body):
-    """Serialize in fixed key order. Empty optional lists and empty
-    last_evidenced are omitted. Round-trips byte-identically with parse."""
-    out = ["---"]
-    for key in KEY_ORDER:
-        if key not in fm:
-            continue
-        val = fm[key]
-        if key in LIST_KEYS:
-            if not val:
-                continue
-            if key in BLOCK_LIST_KEYS:
-                out.append(key + ":")
-                for item in val:
-                    out.append("  - " + _quote(str(item)))
-            else:
-                out.append(key + ": [" + ", ".join(_emit_scalar(x, in_flow=True) for x in val) + "]")
-        else:
-            if key == "last_evidenced" and not val:
-                continue
-            out.append(key + ": " + _emit_scalar(val))
-    out.append("---")
-    text = "\n".join(out) + "\n"
-    if body and not body.endswith("\n"):
-        body += "\n"
-    return text + body
-
-
-# ---------------------------------------------------------------- concept ---
-
-class Concept:
-    def __init__(self, cid, fm, body, path=None, parse_error=None):
-        self.id = cid
-        self.fm = fm
-        self.body = body
-        self.path = path
-        self.parse_error = parse_error
-
-    def get_list(self, key):
-        v = self.fm.get(key, [])
-        return v if isinstance(v, list) else []
-
-    @property
-    def level(self):
-        v = self.fm.get("level")
-        return v if isinstance(v, int) else None
-
-    def to_record(self, kb=None, threshold=None):
-        rec = {}
-        for key in KEY_ORDER:
-            if key in LIST_KEYS:
-                rec[key] = list(self.get_list(key))
-            else:
-                rec[key] = self.fm.get(key, "" if key != "level" else None)
-        rec["body"] = self.body
-        if kb is not None:
-            rec["required_by"] = kb.inverse("requires", self.id)
-            rec["has_part"] = kb.inverse("part-of", self.id)
-            rec["is_group"] = bool(rec["has_part"])
-            if threshold is not None:
-                rec["missing_prereqs"] = [
-                    r for r in self.get_list("requires")
-                    if kb.level_of(r) < threshold
-                ]
-        rec["file"] = "concepts/%s.md" % self.id
-        return rec
-
-
-# ------------------------------------------------------------ knowledge base ---
 
 def today():
-    override = os.environ.get("KNOWLEDGE_TRACK_TODAY")
-    if override:
-        if not DATE_RE.match(override):
-            raise KtError("KNOWLEDGE_TRACK_TODAY must be YYYY-MM-DD")
-        return override
-    return datetime.date.today().isoformat()
+    return os.environ.get("KNOWLEDGE_TRACK_TODAY") or datetime.date.today().isoformat()
 
 
 def kb_dir():
-    return Path(os.environ.get("KNOWLEDGE_TRACK_DIR") or (Path.home() / ".claude" / "knowledge")).expanduser()
+    return Path(os.environ.get("KNOWLEDGE_TRACK_DIR") or Path.home() / ".claude" / "knowledge")
 
+
+# ------------------------------------------------------------- matching ---
+
+def norm(s):
+    """Lowercase, punctuation and hyphens to spaces, collapse whitespace."""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", s.lower()).split())
+
+
+def similarity(a, b, floor=0.0):
+    """Max of character similarity and word overlap, on normalised strings.
+
+    Scores below `floor` may be returned as 0.0; the cheap upper bounds skip the
+    expensive ratio() for pairs that cannot reach it.
+    """
+    if not a or not b:
+        return 0.0
+    ta, tb = set(a.split()), set(b.split())
+    jaccard = len(ta & tb) / len(ta | tb)
+    if jaccard >= floor and floor > 0:
+        return jaccard if jaccard >= 1 else max(jaccard, difflib.SequenceMatcher(None, a, b).ratio())
+    sm = difflib.SequenceMatcher(None, a, b)
+    if sm.real_quick_ratio() < floor or sm.quick_ratio() < floor:
+        return jaccard
+    return max(sm.ratio(), jaccard)
+
+
+def names_of(c):
+    """Every normalised string a concept answers to."""
+    return {n for n in (norm(c["id"]), norm(c["name"]), *(norm(a) for a in c["aliases"])) if n}
+
+
+# ------------------------------------------------------------------- KB ---
 
 class KB:
     def __init__(self, root):
-        self.root = Path(root)
-        self.concepts_dir = self.root / "concepts"
+        self.root = root
+        self.path = root / DATA_FILE
         self.concepts = {}
-        self.file_errors = []  # (id, message) for unparseable files
-        self.config = dict(DEFAULT_CONFIG)
 
-    # -- loading ------------------------------------------------------------
     def load(self):
-        if not self.concepts_dir.is_dir():
-            raise KtError("no knowledge base at %s (run `kt init`, or git clone your knowledge repo there)" % self.root)
-        cfg = self.root / "config.json"
-        if cfg.exists():
-            try:
-                self.config.update(json.loads(cfg.read_text()))
-            except (ValueError, OSError) as e:
-                raise KtError("config.json is unreadable: %s" % e)
-        for path in sorted(self.concepts_dir.glob("*.md")):
-            stem = path.stem
-            try:
-                fm, body = parse_frontmatter(path.read_text())
-            except ValueError as e:
-                self.file_errors.append((stem, "%s: %s" % (path.name, e)))
-                self.concepts[stem] = Concept(stem, {"id": stem}, "", path, parse_error=str(e))
+        if not self.path.exists():
+            raise KtError("no knowledge base at %s (run `kt init`)" % self.root)
+        for n, line in enumerate(self.path.read_text().splitlines(), 1):
+            if not line.strip():
                 continue
-            self.concepts[stem] = Concept(stem, fm, body, path)
+            if line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
+                raise KtError("%s:%d: merge conflict marker; resolve it in git first" % (DATA_FILE, n))
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise KtError("%s:%d: invalid JSON: %s" % (DATA_FILE, n, e))
+            if not isinstance(rec, dict):
+                raise KtError("%s:%d: not a JSON object" % (DATA_FILE, n))
+            c = {k: rec.get(k, list(d) if isinstance(d, list) else d) for k, (_, d) in FIELDS.items()}
+            c.update({k: v for k, v in rec.items() if k not in FIELDS})  # kept so validate reports them
+            if c["id"] in self.concepts:
+                raise KtError("%s:%d: duplicate id %r" % (DATA_FILE, n, c["id"]))
+            self.concepts[c["id"]] = c
         return self
 
-    def ids(self):
-        return sorted(self.concepts)
-
-    def require(self, cid):
+    def get(self, cid):
         if cid not in self.concepts:
-            raise KtError("no concept with id %r" % cid)
+            raise KtError("no concept %r" % cid)
         return self.concepts[cid]
 
-    def level_of(self, cid):
-        c = self.concepts.get(cid)
-        if c is None or c.level is None:
-            return 0
-        return c.level
+    # -- validation
 
-    def inverse(self, relation, cid):
-        return sorted(o.id for o in self.concepts.values() if cid in o.get_list(relation))
-
-    # -- graph --------------------------------------------------------------
-    def find_cycles(self, relation):
-        """Return a list of cycles (each a list of ids) for a DAG relation."""
-        WHITE, GREY, BLACK = 0, 1, 2
-        color = {cid: WHITE for cid in self.concepts}
-        cycles = []
-        stack = []
-
-        def visit(u):
-            color[u] = GREY
-            stack.append(u)
-            for v in self.concepts[u].get_list(relation):
-                if v not in color:
+    def validate(self):
+        errors = []
+        owner = {}  # normalised name/alias -> id, for collision detection
+        for cid, c in sorted(self.concepts.items()):
+            def err(msg):
+                errors.append("%s: %s" % (cid, msg))
+            for k in c:
+                if k not in FIELDS:
+                    err("unknown field %r" % k)
+            for k in REQUIRED:
+                if c.get(k) in (None, ""):
+                    err("missing %s" % k)
+            if not isinstance(cid, str) or not ID_RE.match(cid):
+                err("id must be lowercase kebab-case")
+            for k, (t, _) in FIELDS.items():
+                v = c.get(k)
+                if v is not None and not (isinstance(v, t) and not isinstance(v, bool)):
+                    err("%s must be %s" % (k, t.__name__))
+            if isinstance(c.get("level"), int) and c["level"] not in LEVELS:
+                err("level must be 0-3")
+            if isinstance(c.get("level"), int) and c["level"] >= 1 and not c.get("note"):
+                err("level >= 1 needs a note saying why")
+            if isinstance(c.get("updated"), str) and not DATE_RE.match(c["updated"]):
+                err("updated must be YYYY-MM-DD")
+            for k in LIST_FIELDS:
+                v = c.get(k)
+                if not isinstance(v, list):
                     continue
-                if color[v] == GREY:
-                    cycles.append(stack[stack.index(v):] + [v])
-                elif color[v] == WHITE:
-                    visit(v)
-            stack.pop()
-            color[u] = BLACK
+                if any(not isinstance(x, str) or not x.strip() for x in v):
+                    err("%s items must be non-empty strings" % k)
+                elif len(set(v)) != len(v):
+                    err("%s has duplicates" % k)
+            for r in c.get("requires") or []:
+                if r == cid:
+                    err("requires itself")
+                elif r not in self.concepts:
+                    err("requires unknown id %r" % r)
+            if isinstance(c.get("name"), str) and isinstance(c.get("aliases"), list):
+                for n in names_of(c):
+                    other = owner.setdefault(n, cid)
+                    if other != cid:
+                        err("name/alias %r already belongs to %s" % (n, other))
+        cycle = self.find_cycle()
+        if cycle:
+            errors.append("requires cycle: %s" % " -> ".join(cycle))
+        return errors
+
+    def find_cycle(self):
+        state = {}
+
+        def visit(cid, path):
+            state[cid] = 1
+            for r in self.concepts[cid].get("requires") or []:
+                if r not in self.concepts:
+                    continue
+                if state.get(r) == 1:
+                    return path[path.index(r):] + [r]
+                if r not in state:
+                    found = visit(r, path + [r])
+                    if found:
+                        return found
+            state[cid] = 2
+            return None
 
         for cid in sorted(self.concepts):
-            if color[cid] == WHITE:
-                visit(cid)
-        return cycles
+            if cid not in state:
+                found = visit(cid, [cid])
+                if found:
+                    return found
+        return None
 
-    def transitive(self, relation, cid):
-        """All ids reachable from cid via relation (excluding cid), BFS order."""
-        seen, order, queue = {cid}, [], [cid]
-        while queue:
-            u = queue.pop(0)
-            c = self.concepts.get(u)
-            if c is None:
-                continue
-            for v in c.get_list(relation):
-                if v not in seen:
-                    seen.add(v)
-                    order.append(v)
-                    queue.append(v)
-        return order
+    # -- writing
 
-    # -- lint ---------------------------------------------------------------
-    def lint(self):
-        """Return (errors, warnings), each a list of (id, message)."""
-        errors, warnings = [], []
-        errors.extend(self.file_errors)
-        broken = {cid for cid, _ in self.file_errors}
-        alias_owner = {}
+    def serialise(self, c):
+        rec = {}
+        for k, (_, d) in FIELDS.items():
+            if c.get(k) != d or k in REQUIRED:
+                rec[k] = c[k]
+        return json.dumps(rec, ensure_ascii=False)
 
-        for cid in self.ids():
-            if cid in broken:
-                continue
-            c = self.concepts[cid]
-            fm = c.fm
-            err = lambda m: errors.append((cid, m))  # noqa: E731
-            warn = lambda m: warnings.append((cid, m))  # noqa: E731
+    def save(self, message):
+        """validate -> atomic write -> local git commit. Refuses invalid state."""
+        errors = self.validate()
+        if errors:
+            raise KtError("refused, the result would be invalid:\n  " + "\n  ".join(errors))
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text("".join(self.serialise(self.concepts[k]) + "\n" for k in sorted(self.concepts)))
+        os.replace(tmp, self.path)
+        return git_commit(self.root, message)
 
-            for key in fm:
-                if key not in KEY_ORDER:
-                    err("unknown key %r" % key)
-            for key in REQUIRED_KEYS:
-                if key not in fm:
-                    err("missing required key %r" % key)
-            for key in SCALAR_KEYS:
-                if key in fm and isinstance(fm[key], list):
-                    err("%r must be a scalar, not a list" % key)
-            for key in LIST_KEYS:
-                if key in fm and not isinstance(fm[key], list):
-                    err("%r must be a list" % key)
-                    fm[key] = []
+    # -- queries
 
-            fid = fm.get("id")
-            if isinstance(fid, str):
-                if not ID_RE.match(fid):
-                    err("id %r must match ^[a-z0-9]+(-[a-z0-9]+)*$" % fid)
-                if fid != cid:
-                    err("id %r does not equal filename stem %r" % (fid, cid))
-            if not str(fm.get("title", "")).strip():
-                err("title is required and must be non-empty")
-            if "kind" in fm and fm["kind"] not in KINDS:
-                err("kind %r must be one of %s" % (fm["kind"], ", ".join(KINDS)))
-            lvl = fm.get("level")
-            if "level" in fm and (not isinstance(lvl, int) or not 0 <= lvl <= 5):
-                err("level %r must be an integer 0-5" % (lvl,))
-                lvl = None
-
-            evidence = c.get_list("evidence")
-            dates = []
-            for e in evidence:
-                m = EVIDENCE_RE.match(str(e))
-                if not m:
-                    err("evidence %r must match '<YYYY-MM-DD> <%s>: <note>'" % (e, "|".join(EVIDENCE_KINDS)))
-                    continue
-                if not _valid_date(m.group(1)):
-                    err("evidence %r has an invalid date" % e)
-                    continue
-                dates.append(m.group(1))
-            if isinstance(lvl, int) and lvl >= 1 and not evidence:
-                err("level %d requires at least one evidence line" % lvl)
-            le = fm.get("last_evidenced", "")
-            if dates:
-                newest = max(dates)
-                if not le:
-                    err("last_evidenced is required when evidence is present (expected %s)" % newest)
-                elif le != newest:
-                    err("last_evidenced %r must equal the newest evidence date %s" % (le, newest))
-            elif le:
-                err("last_evidenced is set but there is no evidence")
-            for key in ("created", "updated", "last_evidenced"):
-                v = fm.get(key)
-                if v and not (isinstance(v, str) and _valid_date(v)):
-                    err("%s %r must be an ISO date YYYY-MM-DD" % (key, v))
-
-            for key in ID_LIST_KEYS:
-                seen = set()
-                for ref in c.get_list(key):
-                    ref = str(ref)
-                    if ref in seen:
-                        err("%s lists %r more than once" % (key, ref))
-                    seen.add(ref)
-                    if ref == cid:
-                        err("%s must not reference itself" % key)
-                    elif ref not in self.concepts:
-                        err("%s references unknown id %r" % (key, ref))
-                    elif ref in broken:
-                        pass
-            for key in SYMMETRIC_RELATIONS:
-                for ref in c.get_list(key):
-                    other = self.concepts.get(ref)
-                    if other and other.id != cid and cid not in other.get_list(key):
-                        warn("%s %s is not mirrored in %s" % (key, ref, ref))
-
-            for key in ("aliases", "tags", "misconceptions"):
-                for item in c.get_list(key):
-                    if not str(item).strip():
-                        err("%s contains an empty item" % key)
-            for alias in c.get_list("aliases"):
-                a = str(alias).strip().lower()
-                if a in self.concepts and a != cid:
-                    warn("alias %r collides with the id of another concept" % alias)
-                elif a in alias_owner and alias_owner[a] != cid:
-                    warn("alias %r is also an alias of %s" % (alias, alias_owner[a]))
-                alias_owner.setdefault(a, cid)
-
-            if not c.body.strip():
-                warn("body is empty (write a definition in your own words)")
-            if isinstance(lvl, int) and lvl >= 3:
-                for ref in c.get_list("requires"):
-                    if ref in self.concepts and ref not in broken and self.level_of(ref) < 2:
-                        warn("level %d but prerequisite %s is at level %d" % (lvl, ref, self.level_of(ref)))
-
-        for relation in DAG_RELATIONS:
-            for cyc in self.find_cycles(relation):
-                errors.append((cyc[0], "%s cycle: %s" % (relation, " -> ".join(cyc))))
-
-        has_relation = set()
+    def resolve(self, term):
+        """Return (id, how) for an exact match, else (None, [(score, id), ...])."""
+        if term in self.concepts:
+            return term, "id"
+        t = norm(term)
         for c in self.concepts.values():
-            for key in ID_LIST_KEYS:
-                for ref in c.get_list(key):
-                    has_relation.add(c.id)
-                    has_relation.add(str(ref))
-        for cid in self.ids():
-            if cid not in has_relation and cid not in broken:
-                warnings.append((cid, "orphan: no relations to or from any other concept"))
-        return errors, warnings
+            if t == norm(c["id"]):
+                return c["id"], "id"
+            if t == norm(c["name"]):
+                return c["id"], "name"
+            if any(t == norm(a) for a in c["aliases"]):
+                return c["id"], "alias"
+        return None, self.similar(t)
 
-    # -- index --------------------------------------------------------------
-    def build_index(self):
-        records = [self.concepts[cid].to_record(self) for cid in self.ids()
-                   if self.concepts[cid].parse_error is None]
-        (self.root / "index.json").write_text(json.dumps(records, indent=2, sort_keys=False) + "\n")
-        return records
+    def similar(self, t, cutoff=CANDIDATE_CUTOFF, n=3, exclude=()):
+        scored = []
+        for c in self.concepts.values():
+            if c["id"] in exclude:
+                continue
+            best = max(similarity(t, x, cutoff) for x in names_of(c))
+            if best >= cutoff:
+                scored.append((round(best, 2), c["id"]))
+        return sorted(scored, key=lambda s: (-s[0], s[1]))[:n]
 
-    # -- writing ------------------------------------------------------------
-    def write_concept(self, c):
-        path = self.concepts_dir / (c.id + ".md")
-        path.write_text(serialize_frontmatter(c.fm, c.body))
-        c.path = path
+    def required_by(self, cid):
+        return sorted(k for k, c in self.concepts.items() if cid in c["requires"])
 
-    def delete_concept_file(self, cid):
-        path = self.concepts_dir / (cid + ".md")
-        if path.exists():
-            path.unlink()
-
-
-def _valid_date(s):
-    if not DATE_RE.match(s):
-        return False
-    try:
-        datetime.date.fromisoformat(s)
-        return True
-    except ValueError:
-        return False
+    def gaps(self, cid, threshold):
+        """Transitive prerequisites of cid with level below threshold."""
+        seen, stack, out = set(), list(self.get(cid)["requires"]), []
+        while stack:
+            r = stack.pop()
+            if r in seen or r not in self.concepts:
+                continue
+            seen.add(r)
+            if self.concepts[r]["level"] < threshold:
+                out.append(r)
+            stack.extend(self.concepts[r]["requires"])
+        return sorted(out)
 
 
 # ------------------------------------------------------------------ git ---
 
-def git(root, *args, check=True, capture=True):
-    cmd = ["git", "-C", str(root)] + list(args)
-    res = subprocess.run(cmd, capture_output=capture, text=True)
-    if check and res.returncode != 0:
-        raise KtError("git %s failed:\n%s" % (" ".join(args), (res.stderr or res.stdout).strip()))
-    return res
+def git(root, *args):
+    return subprocess.run(["git", "-C", str(root)] + list(args), capture_output=True, text=True)
 
 
-def _identity_args(root):
-    """Extra -c args when the repo has no committer identity configured."""
-    name = subprocess.run(["git", "-C", str(root), "config", "user.name"], capture_output=True, text=True)
-    email = subprocess.run(["git", "-C", str(root), "config", "user.email"], capture_output=True, text=True)
-    extra = []
-    if name.returncode != 0 or not name.stdout.strip():
-        extra += ["-c", "user.name=kt"]
-    if email.returncode != 0 or not email.stdout.strip():
-        extra += ["-c", "user.email=kt@localhost"]
-    return extra
-
-
-def git_commit(kb, message):
-    """Stage everything and commit locally. Never touches the network."""
-    if not kb.config.get("auto_commit", True):
+def git_commit(root, message):
+    """Stage and commit locally if root is a git repo. Never touches the network."""
+    if not (root / ".git").exists():
         return False
-    if not (kb.root / ".git").exists():
+    git(root, "add", DATA_FILE)
+    if git(root, "diff", "--cached", "--quiet").returncode == 0:
         return False
-    git(kb.root, "add", "-A")
-    staged = subprocess.run(["git", "-C", str(kb.root), "diff", "--cached", "--quiet"])
-    if staged.returncode == 0:
-        return False
-    cmd = ["git", "-C", str(kb.root)] + _identity_args(kb.root) + ["commit", "-q", "--no-verify", "-m", message]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    ident = []
+    if not git(root, "config", "user.name").stdout.strip():
+        ident += ["-c", "user.name=kt"]
+    if not git(root, "config", "user.email").stdout.strip():
+        ident += ["-c", "user.email=kt@localhost"]
+    res = subprocess.run(["git", "-C", str(root)] + ident + ["commit", "-q", "--no-verify", "-m", message],
+                         capture_output=True, text=True)
     if res.returncode != 0:
         raise KtError("git commit failed:\n%s" % (res.stderr or res.stdout).strip())
     return True
 
 
-def current_branch(root):
-    res = git(root, "rev-parse", "--abbrev-ref", "HEAD", check=False)
-    return res.stdout.strip() if res.returncode == 0 else None
-
-
-# ------------------------------------------------------------ helpers ---
-
-def lint_or_die(kb, verb):
-    errors, _ = kb.lint()
-    if errors:
-        print("kt %s refused: %d lint error(s)" % (verb, len(errors)), file=sys.stderr)
-        for cid, msg in errors:
-            print("  error  %s: %s" % (cid, msg), file=sys.stderr)
-        sys.exit(1)
-
-
-def finish_write(kb, verb, cid, touched=(), deleted=()):
-    """lint -> write -> index -> commit. `touched` are Concept objects."""
-    lint_or_die(kb, verb)
-    for c in touched:
-        kb.write_concept(c)
-    for d in deleted:
-        kb.delete_concept_file(d)
-    kb.build_index()
-    committed = git_commit(kb, "kt: %s %s" % (verb, cid))
-    _, warnings = kb.lint()
-    related_warnings = [w for w in warnings if w[0] == cid or w[0] in {c.id for c in touched}]
-    for wid, msg in related_warnings:
-        print("  warning  %s: %s" % (wid, msg), file=sys.stderr)
-    print("%s %s%s" % (verb, cid, " (committed)" if committed else ""))
-
+# --------------------------------------------------------------- output ---
 
 def split_list(values):
     """Flatten repeated, comma-separated CLI list args."""
-    out = []
-    for v in values or []:
-        for part in str(v).split(","):
-            part = part.strip()
-            if part:
-                out.append(part)
-    return out
+    return [p.strip() for v in values or [] for p in v.split(",") if p.strip()]
 
 
-def print_json(obj):
-    print(json.dumps(obj, indent=2))
+def row(c):
+    return "%-32s %d %-11s %s" % (c["id"], c["level"], LEVELS[c["level"]], c["name"])
+
+
+def emit(obj, as_json, lines):
+    if as_json:
+        print(json.dumps(obj, indent=2, ensure_ascii=False))
+    else:
+        for line in lines:
+            print(line)
 
 
 def parse_level_filter(spec):
-    m = re.match(r"^\s*(<=|>=|==|=|<|>)?\s*(\d)\s*$", spec)
+    m = re.match(r"^(<=|>=|<|>|=)?([0-3])$", spec.strip())
     if not m:
-        raise KtError("--level must look like '<3', '>=2' or '=0'")
+        raise KtError("bad --level %r (use e.g. '<2', '>=1', '3')" % spec)
     op, n = m.group(1) or "=", int(m.group(2))
-    ops = {
-        "<": lambda x: x < n, "<=": lambda x: x <= n, ">": lambda x: x > n,
-        ">=": lambda x: x >= n, "=": lambda x: x == n, "==": lambda x: x == n,
-    }
-    return ops[op]
+    return {"<": lambda x: x < n, "<=": lambda x: x <= n, ">": lambda x: x > n,
+            ">=": lambda x: x >= n, "=": lambda x: x == n}[op]
 
 
-def resolve_term(kb, term, fuzzy=False):
-    """Return (id or None, matched_by)."""
-    if term in kb.concepts:
-        return term, "id"
-    low = term.strip().lower()
-    if low in kb.concepts:
-        return low, "id"
-    for c in kb.concepts.values():
-        if any(str(a).strip().lower() == low for a in c.get_list("aliases")):
-            return c.id, "alias"
-    for c in kb.concepts.values():
-        if str(c.fm.get("title", "")).strip().lower() == low:
-            return c.id, "title"
-    if not fuzzy:
-        return None, None
-    candidates = {}
-    for c in kb.concepts.values():
-        candidates.setdefault(c.id, c.id)
-        for a in c.get_list("aliases"):
-            candidates.setdefault(str(a).lower(), c.id)
-        candidates.setdefault(str(c.fm.get("title", "")).lower(), c.id)
-    close = difflib.get_close_matches(low, list(candidates), n=1, cutoff=0.75)
-    if close:
-        return candidates[close[0]], "fuzzy"
-    # substring fallback: term inside a title, or an id inside the term
-    for cand, cid in candidates.items():
-        if cand and (low in cand or cand in low) and min(len(low), len(cand)) >= 4:
-            return cid, "fuzzy"
-    return None, None
-
-
-def new_concept(kb, cid, title, kind, level, evidence, aliases, tags, relations, body):
-    fm = {
-        "id": cid, "title": title, "kind": kind, "level": level,
-        "aliases": aliases, "tags": tags,
-        "requires": relations.get("requires", []),
-        "part-of": relations.get("part-of", []),
-        "related": relations.get("related", []),
-        "contrasts-with": relations.get("contrasts-with", []),
-        "evidence": evidence, "misconceptions": [],
-        "created": today(), "updated": today(),
-    }
-    c = Concept(cid, fm, body or "")
-    refresh_last_evidenced(c)
-    return c
-
-
-def refresh_last_evidenced(c):
-    dates = [m.group(1) for m in (EVIDENCE_RE.match(str(e)) for e in c.get_list("evidence")) if m]
-    c.fm["last_evidenced"] = max(dates) if dates else ""
-
-
-def mirror_symmetric(kb, c):
-    """Ensure every symmetric relation listed in c is mirrored on the other side.
-    Returns the list of other concepts modified."""
-    changed = []
-    for rel in SYMMETRIC_RELATIONS:
-        for ref in c.get_list(rel):
-            other = kb.concepts.get(ref)
-            if other and other.id != c.id and c.id not in other.get_list(rel):
-                other.fm.setdefault(rel, [])
-                if not isinstance(other.fm[rel], list):
-                    other.fm[rel] = []
-                other.fm[rel].append(c.id)
-                other.fm["updated"] = today()
-                if other not in changed:
-                    changed.append(other)
-    return changed
-
-
-def read_body_arg(args):
-    if getattr(args, "body_file", None):
-        return Path(args.body_file).read_text()
-    b = getattr(args, "body", None)
-    if b is None:
-        return ""
-    if b == "-":
-        return sys.stdin.read()
-    return b
-
-
-# ----------------------------------------------------------- commands ---
+# ------------------------------------------------------------- commands ---
 
 def cmd_init(args):
     root = kb_dir()
     root.mkdir(parents=True, exist_ok=True)
-    (root / "concepts").mkdir(exist_ok=True)
-    created = []
-    cfg = root / "config.json"
-    if not cfg.exists():
-        cfg.write_text(json.dumps(DEFAULT_CONFIG, indent=2) + "\n")
-        created.append("config.json")
+    path = root / DATA_FILE
+    if not path.exists():
+        path.write_text("")
     readme = root / "README.md"
     if not readme.exists():
         readme.write_text(
             "# knowledge\n\n"
-            "A personal inventory of what I know and how well, one concept per file in `concepts/`.\n"
-            "Written only by the `kt` CLI from the `knowledge-track` Claude Code plugin\n"
-            "(research-tools marketplace). The schema is in that plugin's `SPEC.md`.\n\n"
-            "Do not edit these files by hand; use `kt`.\n"
+            "What I know and how well: one concept per line in `concepts.jsonl`.\n"
+            "Written by the `kt` CLI from the knowledge-track plugin (research-tools);\n"
+            "the schema is in that plugin's SPEC.md. Read freely; write through `kt`.\n"
         )
-        created.append("README.md")
-    gi = root / ".gitignore"
-    if not gi.exists():
-        gi.write_text("index.json\n")
-        created.append(".gitignore")
     if not (root / ".git").exists():
         git(root, "init", "-q")
-        created.append(".git")
-    kb = KB(root).load()
-    kb.build_index()
-    if git_commit(kb, "kt: init"):
-        created.append("initial commit")
-    print("knowledge base at %s%s" % (root, (" (created: %s)" % ", ".join(created)) if created else " (already initialised)"))
-
-
-def cmd_remote(args):
-    kb = KB(kb_dir()).load()
-    existing = git(kb.root, "remote", check=False).stdout.split()
-    if "origin" in existing:
-        git(kb.root, "remote", "set-url", "origin", args.url)
-    else:
-        git(kb.root, "remote", "add", "origin", args.url)
-    branch = current_branch(kb.root)
-    if branch is None or branch == "HEAD":
-        raise KtError("repository has no commits yet; run a write command first")
-    res = git(kb.root, "push", "-u", "origin", branch, check=False)
-    if res.returncode != 0:
-        raise KtError("push to %s failed:\n%s" % (args.url, (res.stderr or res.stdout).strip()))
-    print("origin set to %s and %s pushed" % (args.url, branch))
-
-
-def cmd_sync(args):
-    kb = KB(kb_dir()).load()
-    if "origin" not in git(kb.root, "remote", check=False).stdout.split():
-        raise KtError("no remote configured; run `kt remote <url>` first")
-    branch = current_branch(kb.root)
-    dirty = git(kb.root, "status", "--porcelain", check=False).stdout.strip()
-    if dirty:
-        raise KtError("working tree has uncommitted changes; commit or discard them before `kt sync`:\n" + dirty)
-    pull = git(kb.root, "pull", "--rebase", "origin", branch, check=False)
-    if pull.returncode != 0:
-        out = (pull.stdout + pull.stderr)
-        if "CONFLICT" in out or "could not apply" in out:
-            conflicted = git(kb.root, "diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
-            print("kt sync: merge conflict during rebase", file=sys.stderr)
-            for f in conflicted:
-                print("  conflict  %s" % f, file=sys.stderr)
-            print("Resolve the markers in those files, then run:\n"
-                  "  git -C %s add -A && git -C %s rebase --continue\n"
-                  "  kt lint\n"
-                  "or abort with: git -C %s rebase --abort" % (kb.root, kb.root, kb.root), file=sys.stderr)
-            sys.exit(1)
-        raise KtError("git pull --rebase failed:\n%s" % out.strip())
-    push = git(kb.root, "push", "origin", branch, check=False)
-    if push.returncode != 0:
-        raise KtError("git push failed:\n%s" % (push.stderr or push.stdout).strip())
-    kb = KB(kb.root).load()
-    kb.build_index()
-    errors, _ = kb.lint()
-    if errors:
-        print("synced, but the knowledge base now has %d lint error(s); run `kt lint`" % len(errors), file=sys.stderr)
-        sys.exit(1)
-    print("synced %s with origin" % branch)
-
-
-def cmd_status(args):
-    kb = KB(kb_dir()).load()
-    by_level = {str(n): 0 for n in range(6)}
-    by_kind = {k: 0 for k in KINDS}
-    for c in kb.concepts.values():
-        if c.parse_error:
-            continue
-        by_level[str(c.level if c.level is not None else 0)] += 1
-        if c.fm.get("kind") in by_kind:
-            by_kind[c.fm["kind"]] += 1
-    info = {
-        "dir": str(kb.root), "concepts": len(kb.concepts),
-        "by_level": by_level, "by_kind": by_kind,
-        "unparseable": [cid for cid, _ in kb.file_errors],
-        "git": None,
-    }
-    if (kb.root / ".git").exists():
-        g = {"branch": current_branch(kb.root)}
-        g["dirty"] = bool(git(kb.root, "status", "--porcelain", check=False).stdout.strip())
-        remote = git(kb.root, "remote", "get-url", "origin", check=False)
-        g["remote"] = remote.stdout.strip() if remote.returncode == 0 else None
-        ab = git(kb.root, "rev-list", "--left-right", "--count", "HEAD...@{upstream}", check=False)
-        if ab.returncode == 0:
-            ahead, behind = ab.stdout.split()
-            g["ahead"], g["behind"] = int(ahead), int(behind)
-        else:
-            g["ahead"] = g["behind"] = None
-        info["git"] = g
-    if args.json:
-        print_json(info)
-        return
-    print("knowledge base: %s" % info["dir"])
-    print("concepts: %d" % info["concepts"])
-    print("by level: " + "  ".join("%s=%d" % (LEVEL_NAMES[int(k)], v) for k, v in by_level.items()))
-    print("by kind:  " + "  ".join("%s=%d" % kv for kv in by_kind.items()))
-    if info["unparseable"]:
-        print("unparseable: " + ", ".join(info["unparseable"]) + "  (run `kt lint`)")
-    g = info["git"]
-    if g:
-        line = "git: branch %s" % g["branch"]
-        if g["remote"]:
-            line += ", remote %s" % g["remote"]
-            if g["ahead"] is not None:
-                line += ", ahead %d / behind %d (local refs; run `kt sync`)" % (g["ahead"], g["behind"])
-            else:
-                line += ", no upstream tracking"
-        else:
-            line += ", no remote"
-        if g["dirty"]:
-            line += ", uncommitted changes"
-        print(line)
-    else:
-        print("git: not a repository (run `kt init`)")
-
-
-def cmd_index(args):
-    kb = KB(kb_dir()).load()
-    records = kb.build_index()
-    print("indexed %d concept(s) to %s" % (len(records), kb.root / "index.json"))
-
-
-def cmd_lint(args):
-    kb = KB(kb_dir()).load()
-    errors, warnings = kb.lint()
-    if args.ids:
-        want = set(args.ids)
-        errors = [e for e in errors if e[0] in want]
-        warnings = [w for w in warnings if w[0] in want]
-    if args.json:
-        print_json({"errors": [{"id": i, "message": m} for i, m in errors],
-                    "warnings": [{"id": i, "message": m} for i, m in warnings]})
-    else:
-        for cid, msg in errors:
-            print("error    %s: %s" % (cid, msg))
-        for cid, msg in warnings:
-            print("warning  %s: %s" % (cid, msg))
-        print("%d concept(s), %d error(s), %d warning(s)" % (len(kb.concepts), len(errors), len(warnings)))
-    sys.exit(1 if errors else 0)
-
-
-def cmd_add(args):
-    kb = KB(kb_dir()).load()
-    if args.id in kb.concepts:
-        raise KtError("concept %r already exists (use `kt set` or `kt add-evidence`)" % args.id)
-    relations = {
-        "requires": split_list(args.requires), "part-of": split_list(args.part_of),
-        "related": split_list(args.related), "contrasts-with": split_list(args.contrasts_with),
-    }
-    c = new_concept(kb, args.id, args.title, args.kind, args.level, list(args.evidence or []),
-                    split_list(args.alias), split_list(args.tag), relations, read_body_arg(args))
-    kb.concepts[c.id] = c
-    touched = [c] + mirror_symmetric(kb, c)
-    finish_write(kb, "add", c.id, touched)
-
-
-def cmd_show(args):
-    kb = KB(kb_dir()).load()
-    c = kb.require(args.id)
-    rec = c.to_record(kb, threshold=args.threshold)
-    if args.json:
-        print_json(rec)
-        return
-    lvl = c.level if c.level is not None else 0
-    print("%s  [%s]  level %d (%s)" % (rec["title"], rec["kind"], lvl, LEVEL_NAMES.get(lvl, "?")))
-    print("id: %s" % c.id)
-    if rec["aliases"]:
-        print("aliases: " + ", ".join(rec["aliases"]))
-    if rec["tags"]:
-        print("tags: " + ", ".join(rec["tags"]))
-    for key in ("requires", "part-of", "related", "contrasts-with"):
-        if rec[key]:
-            print("%s: %s" % (key, ", ".join("%s(%d)" % (r, kb.level_of(r)) for r in rec[key])))
-    if rec["required_by"]:
-        print("required by: " + ", ".join(rec["required_by"]))
-    if rec["has_part"]:
-        print("has parts: " + ", ".join(rec["has_part"]))
-    if rec["missing_prereqs"]:
-        print("prerequisites below %d: %s" % (args.threshold, ", ".join(rec["missing_prereqs"])))
-    if rec["evidence"]:
-        print("evidence:")
-        for e in rec["evidence"]:
-            print("  - " + e)
-    if rec["misconceptions"]:
-        print("misconceptions:")
-        for e in rec["misconceptions"]:
-            print("  - " + e)
-    print("created %s, updated %s%s" % (rec["created"], rec["updated"],
-                                        (", last evidenced %s" % rec["last_evidenced"]) if rec["last_evidenced"] else ""))
-    if c.body.strip():
-        print()
-        print(c.body.rstrip())
-
-
-def cmd_get(args):
-    kb = KB(kb_dir()).load()
-    c = kb.require(args.id)
-    print_json(c.to_record(kb, threshold=args.threshold))
-
-
-def _print_table(kb, ids, as_json):
-    if as_json:
-        print_json([kb.concepts[i].to_record(kb) for i in ids])
-        return
-    for i in ids:
-        c = kb.concepts[i]
-        lvl = c.level if c.level is not None else 0
-        print("%-32s %d  %-8s %s" % (i, lvl, c.fm.get("kind", "?"), c.fm.get("title", "")))
-
-
-def cmd_list(args):
-    kb = KB(kb_dir()).load()
-    _print_table(kb, kb.ids(), args.json)
-
-
-def cmd_query(args):
-    kb = KB(kb_dir()).load()
-    ids = kb.ids()
-    if args.level:
-        pred = parse_level_filter(args.level)
-        ids = [i for i in ids if pred(kb.level_of(i))]
-    if args.kind:
-        ids = [i for i in ids if kb.concepts[i].fm.get("kind") == args.kind]
-    if args.tag:
-        ids = [i for i in ids if args.tag in kb.concepts[i].get_list("tags")]
-    if args.requires_of:
-        direct = set(kb.require(args.requires_of).get_list("requires"))
-        ids = [i for i in ids if i in direct]
-    if args.required_by:
-        kb.require(args.required_by)
-        ids = [i for i in ids if args.required_by in kb.concepts[i].get_list("requires")]
-    if args.part_of:
-        kb.require(args.part_of)
-        ids = [i for i in ids if args.part_of in kb.concepts[i].get_list("part-of")]
-    if args.unresolved:
-        ids = [i for i in ids if any(
-            ref not in kb.concepts for key in ID_LIST_KEYS for ref in kb.concepts[i].get_list(key))]
-    _print_table(kb, ids, args.json)
-
-
-def cmd_check(args):
-    kb = KB(kb_dir()).load()
-    results = []
-    for term in args.terms:
-        cid, how = resolve_term(kb, term, fuzzy=args.resolve)
-        if cid is None:
-            results.append({"query": term, "id": None, "known": False, "level": 0, "matched_by": None})
-        else:
-            lvl = kb.level_of(cid)
-            results.append({"query": term, "id": cid, "known": lvl >= args.threshold, "level": lvl,
-                            "matched_by": how, "title": kb.concepts[cid].fm.get("title", "")})
-    if args.json:
-        print_json(results)
-        return
-    for r in results:
-        if r["id"] is None:
-            print("%-32s -> (not in knowledge base)  level 0" % r["query"])
-        else:
-            print("%-32s -> %-28s level %d (%s)%s" % (
-                r["query"], r["id"], r["level"], LEVEL_NAMES[r["level"]],
-                "" if r["matched_by"] == "id" else "  via %s" % r["matched_by"]))
-
-
-def cmd_graph(args):
-    kb = KB(kb_dir()).load()
-    relations = [args.relation] if args.relation else DAG_RELATIONS
-    edges = []
-    for cid in kb.ids():
-        for rel in relations:
-            for ref in kb.concepts[cid].get_list(rel):
-                edges.append({"from": cid, "relation": rel, "to": ref})
-    if args.json:
-        print_json({"nodes": [{"id": i, "level": kb.level_of(i), "title": kb.concepts[i].fm.get("title", "")}
-                              for i in kb.ids()], "edges": edges})
-        return
-    safe = lambda s: re.sub(r"[^A-Za-z0-9_]", "_", s)  # noqa: E731
-    if args.dot:
-        print("digraph knowledge {")
-        print("  rankdir=BT;")
-        for i in kb.ids():
-            print('  %s [label="%s\\n(%d)"];' % (safe(i), i, kb.level_of(i)))
-        for e in edges:
-            style = "" if e["relation"] == "requires" else ' [style=dashed, label="part-of"]'
-            print("  %s -> %s%s;" % (safe(e["from"]), safe(e["to"]), style))
-        print("}")
-    else:
-        print("graph BT")
-        for i in kb.ids():
-            print('  %s["%s (%d)"]' % (safe(i), i, kb.level_of(i)))
-        for e in edges:
-            arrow = "-->" if e["relation"] == "requires" else "-. part-of .->"
-            print("  %s %s %s" % (safe(e["from"]), arrow, safe(e["to"])))
+        git(root, "add", "README.md")
+    git_commit(root, "kt: init")
+    print("knowledge base at %s" % root)
 
 
 def cmd_set(args):
     kb = KB(kb_dir()).load()
-    c = kb.require(args.id)
-    block_updates = {}
-    for kv in args.assignments:
-        if "=" not in kv:
-            raise KtError("expected key=value, got %r" % kv)
-        key, value = kv.split("=", 1)
-        key = key.strip()
-        if key in MANAGED_KEYS:
-            raise KtError("%r is maintained by kt and cannot be set directly" % key)
-        if key == "body":
-            c.body = value
-        elif key == "level":
-            if not re.match(r"^\d$", value.strip()):
-                raise KtError("level must be an integer 0-5")
-            c.fm["level"] = int(value)
-        elif key in SCALAR_KEYS:
-            c.fm[key] = value
-        elif key in BLOCK_LIST_KEYS:
-            block_updates.setdefault(key, [])
-            if value.strip():
-                block_updates[key].append(value)
-        elif key in LIST_KEYS:
-            c.fm[key] = split_list([value])
-        else:
-            raise KtError("unknown key %r (allowed: %s, body)" % (key, ", ".join(k for k in KEY_ORDER if k not in MANAGED_KEYS)))
-    for key, items in block_updates.items():
-        c.fm[key] = items
-    refresh_last_evidenced(c)
-    c.fm["updated"] = today()
-    touched = [c] + mirror_symmetric(kb, c)
-    finish_write(kb, "set", c.id, touched)
-
-
-def cmd_add_evidence(args):
-    kb = KB(kb_dir()).load()
-    c = kb.require(args.id)
-    if not EVIDENCE_RE.match(args.evidence):
-        raise KtError("evidence must look like '<YYYY-MM-DD> <%s>: <note>'" % "|".join(EVIDENCE_KINDS))
-    c.fm.setdefault("evidence", [])
-    c.fm["evidence"].append(args.evidence)
+    cid = args.id
+    creating = cid not in kb.concepts
+    if creating:
+        if not ID_RE.match(cid):
+            raise KtError("id must be lowercase kebab-case")
+        if args.level is None:
+            raise KtError("new concept needs --level")
+        name = args.name or cid.replace("-", " ")
+        if not args.new:
+            probe = {"id": cid, "name": name, "aliases": split_list(args.alias)}
+            close = {}
+            for n in names_of(probe):
+                for score, other in kb.similar(n, cutoff=SIMILAR_CUTOFF):
+                    close[other] = max(score, close.get(other, 0))
+            if close:
+                listed = ", ".join("%s (%.2f)" % kv for kv in sorted(close.items(), key=lambda kv: -kv[1]))
+                raise KtError("similar concept exists: %s\n"
+                              "  same thing: kt set <that-id> --alias \"%s\"\n"
+                              "  different:  rerun with --new" % (listed, name))
+        c = {k: (list(d) if isinstance(d, list) else d) for k, (_, d) in FIELDS.items()}
+        c.update(id=cid, name=name)
+        kb.concepts[cid] = c
+    else:
+        c = kb.concepts[cid]
+    for k in args.clear or []:
+        if k not in LIST_FIELDS:
+            raise KtError("--clear takes one of: %s" % ", ".join(LIST_FIELDS))
+        c[k] = []
+    if args.name is not None:
+        c["name"] = args.name
     if args.level is not None:
-        c.fm["level"] = args.level
-    refresh_last_evidenced(c)
-    c.fm["updated"] = today()
-    finish_write(kb, "add-evidence", c.id, [c])
+        c["level"] = args.level
+    if args.note is not None:
+        c["note"] = args.note
+    for k, values in (("aliases", args.alias), ("tags", args.tag), ("requires", args.requires)):
+        for v in split_list(values):
+            if v not in c[k]:
+                c[k].append(v)
+    c["updated"] = today()
+    committed = kb.save("kt: %s %s" % ("add" if creating else "set", cid))
+    print(("added " if creating else "updated ") + row(c) + (" (committed)" if committed else ""))
 
 
-def _link(kb, a, relation, b, add):
-    ca, cb = kb.require(a), kb.require(b)
-    if a == b:
-        raise KtError("a concept cannot be linked to itself")
-    pairs = [(ca, cb)]
-    if relation in SYMMETRIC_RELATIONS:
-        pairs.append((cb, ca))
-    touched = []
-    for src, dst in pairs:
-        lst = src.fm.setdefault(relation, [])
-        if not isinstance(lst, list):
-            lst = src.fm[relation] = []
-        if add and dst.id not in lst:
-            lst.append(dst.id)
-            src.fm["updated"] = today()
-            touched.append(src)
-        elif not add and dst.id in lst:
-            lst.remove(dst.id)
-            src.fm["updated"] = today()
-            touched.append(src)
-    return touched
-
-
-def cmd_link(args):
+def cmd_get(args):
     kb = KB(kb_dir()).load()
-    touched = _link(kb, args.a, args.relation, args.b, add=True)
-    if not touched:
-        print("already linked: %s %s %s" % (args.a, args.relation, args.b))
-        return
-    finish_write(kb, "link", "%s %s %s" % (args.a, args.relation, args.b), touched)
+    c = kb.get(args.id)
+    out = dict(c, level_name=LEVELS[c["level"]], required_by=kb.required_by(c["id"]),
+               gaps=kb.gaps(c["id"], args.threshold))
+    lines = [row(c)]
+    for k in ("aliases", "tags", "requires", "required_by", "gaps"):
+        if out[k]:
+            lines.append("  %-12s %s" % (k, ", ".join(out[k])))
+    if c["note"]:
+        lines.append("  %-12s %s" % ("note", c["note"]))
+    lines.append("  %-12s %s" % ("updated", c["updated"]))
+    emit(out, args.json, lines)
 
 
-def cmd_unlink(args):
+def cmd_check(args):
     kb = KB(kb_dir()).load()
-    touched = _link(kb, args.a, args.relation, args.b, add=False)
-    if not touched:
-        print("not linked: %s %s %s" % (args.a, args.relation, args.b))
-        return
-    finish_write(kb, "unlink", "%s %s %s" % (args.a, args.relation, args.b), touched)
+    results, lines = [], []
+    for term in args.terms:
+        cid, how = kb.resolve(term)
+        if cid:
+            c = kb.concepts[cid]
+            results.append({"term": term, "id": cid, "level": c["level"], "matched_by": how})
+            label = cid if how == "id" and term == cid else "%r -> %s (%s)" % (term, cid, how)
+            lines.append("%-40s %d %s" % (label, c["level"], LEVELS[c["level"]]))
+        else:
+            cands = [{"id": i, "score": s, "level": kb.concepts[i]["level"]} for s, i in how]
+            results.append({"term": term, "id": None, "level": 0, "candidates": cands})
+            extra = "  maybe: " + ", ".join("%s (%.2f)" % (x["id"], x["score"]) for x in cands) if cands else ""
+            lines.append("%-40s 0 not tracked%s" % (repr(term), extra))
+    emit(results, args.json, lines)
 
 
-def cmd_rename(args):
+def cmd_list(args):
     kb = KB(kb_dir()).load()
-    c = kb.require(args.old)
-    if not ID_RE.match(args.new):
-        raise KtError("new id %r must match ^[a-z0-9]+(-[a-z0-9]+)*$" % args.new)
-    if args.new in kb.concepts:
-        raise KtError("concept %r already exists" % args.new)
-    touched = [c]
-    for other in kb.concepts.values():
-        changed = False
-        for key in ID_LIST_KEYS:
-            lst = other.get_list(key)
-            if args.old in lst:
-                other.fm[key] = [args.new if x == args.old else x for x in lst]
-                changed = True
-        if changed and other is not c:
-            other.fm["updated"] = today()
-            touched.append(other)
-    del kb.concepts[args.old]
-    c.id = args.new
-    c.fm["id"] = args.new
-    c.fm["updated"] = today()
-    kb.concepts[args.new] = c
-    finish_write(kb, "rename", "%s -> %s" % (args.old, args.new), touched, deleted=[args.old])
-
-
-def cmd_rm(args):
-    kb = KB(kb_dir()).load()
-    kb.require(args.id)
-    referrers = []
-    for other in kb.concepts.values():
-        if other.id == args.id:
-            continue
-        if any(args.id in other.get_list(key) for key in ID_LIST_KEYS):
-            referrers.append(other)
-    if referrers and not args.force:
-        raise KtError("%s is referenced by %s; use --force to remove those references too"
-                      % (args.id, ", ".join(o.id for o in referrers)))
-    for other in referrers:
-        for key in ID_LIST_KEYS:
-            lst = other.get_list(key)
-            if args.id in lst:
-                other.fm[key] = [x for x in lst if x != args.id]
-        other.fm["updated"] = today()
-    del kb.concepts[args.id]
-    finish_write(kb, "rm", args.id, referrers, deleted=[args.id])
+    want = parse_level_filter(args.level) if args.level else None
+    tags = set(split_list(args.tag))
+    hits = [c for _, c in sorted(kb.concepts.items())
+            if (want is None or want(c["level"])) and tags <= set(c["tags"])]
+    shown = hits if args.all else hits[:LIST_LIMIT]
+    lines = [row(c) for c in shown]
+    if len(shown) < len(hits):
+        lines.append("... %d more (narrow with --level/--tag, or --all)" % (len(hits) - len(shown)))
+    emit([{k: c[k] for k in ("id", "name", "level", "tags")} for c in shown], args.json, lines)
 
 
 def cmd_gaps(args):
     kb = KB(kb_dir()).load()
-    kb.require(args.id)
-    chain = kb.transitive("requires", args.id)
-    gaps = [i for i in chain if kb.level_of(i) < args.threshold]
-    if args.json:
-        print_json([{"id": i, "level": kb.level_of(i), "title": kb.concepts[i].fm.get("title", "") if i in kb.concepts else None}
-                    for i in gaps])
-        return
-    if not gaps:
-        print("no prerequisites of %s below level %d" % (args.id, args.threshold))
-        return
-    for i in gaps:
-        print("%-32s %d  %s" % (i, kb.level_of(i), kb.concepts[i].fm.get("title", "") if i in kb.concepts else "(missing)"))
+    ids = kb.gaps(args.id, args.threshold)
+    emit([{"id": i, "level": kb.concepts[i]["level"]} for i in ids], args.json,
+         [row(kb.concepts[i]) for i in ids] or ["no prerequisites below level %d" % args.threshold])
 
 
-def cmd_fringe(args):
+def cmd_merge(args):
     kb = KB(kb_dir()).load()
-    ids = [i for i in kb.ids()
-           if kb.level_of(i) < args.threshold
-           and all(kb.level_of(r) >= args.threshold for r in kb.concepts[i].get_list("requires"))]
-    _print_table(kb, ids, args.json)
+    src, dst = kb.get(args.src), kb.get(args.dst)
+    if src is dst:
+        raise KtError("cannot merge a concept into itself")
+    del kb.concepts[src["id"]]
+    for a in [src["name"]] + src["aliases"]:
+        if norm(a) not in names_of(dst) and a not in dst["aliases"]:
+            dst["aliases"].append(a)
+    dst["tags"] += [t for t in src["tags"] if t not in dst["tags"]]
+    dst["requires"] += [r for r in src["requires"] if r not in dst["requires"] and r != dst["id"]]
+    if src["level"] > dst["level"]:
+        dst["level"], dst["note"] = src["level"], src["note"]
+    for c in kb.concepts.values():
+        if src["id"] in c["requires"]:
+            c["requires"] = [r for r in c["requires"] if r != src["id"]]
+            if dst["id"] not in c["requires"] and c["id"] != dst["id"]:
+                c["requires"].append(dst["id"])
+            c["updated"] = today()
+    dst["updated"] = today()
+    committed = kb.save("kt: merge %s into %s" % (src["id"], dst["id"]))
+    print("merged %s into %s%s" % (src["id"], dst["id"], " (committed)" if committed else ""))
 
 
-# ------------------------------------------------------------- argparse ---
+def cmd_dupes(args):
+    kb = KB(kb_dir()).load()
+    items = sorted(kb.concepts.values(), key=lambda c: c["id"])
+    names = {c["id"]: names_of(c) for c in items}
+    # Blocking: only score pairs sharing at least half the character trigrams of
+    # the smaller one, so the audit stays fast on thousands of concepts.
+    grams = {cid: {s[i:i + 3] for s in (n.replace(" ", "") for n in ns) for i in range(len(s) - 2)}
+             for cid, ns in names.items()}
+    postings = {}
+    for cid, gs in grams.items():
+        for g in gs:
+            postings.setdefault(g, []).append(cid)
+    pairs = []
+    for a in items:
+        shared = {}
+        for g in grams[a["id"]]:
+            for b in postings[g]:
+                if b > a["id"]:
+                    shared[b] = shared.get(b, 0) + 1
+        for b, count in shared.items():
+            if count < 0.5 * min(len(grams[a["id"]]), len(grams[b])):
+                continue
+            best = max(similarity(x, y, args.cutoff) for x in names[a["id"]] for y in names[b])
+            if best >= args.cutoff:
+                pairs.append((round(best, 2), a["id"], b))
+    pairs.sort(key=lambda p: (-p[0], p[1], p[2]))
+    shown = pairs if args.all else pairs[:LIST_LIMIT]
+    lines = ["%.2f  %s  ~  %s" % p for p in shown] or ["no likely duplicates"]
+    if len(shown) < len(pairs):
+        lines.append("... %d more (raise --cutoff, or --all)" % (len(pairs) - len(shown)))
+    emit([{"a": a, "b": b, "score": s} for s, a, b in shown], args.json, lines)
+
+
+def cmd_rm(args):
+    kb = KB(kb_dir()).load()
+    kb.get(args.id)
+    users = kb.required_by(args.id)
+    if users and not args.force:
+        raise KtError("%s is required by %s (use --force to drop those links)" % (args.id, ", ".join(users)))
+    del kb.concepts[args.id]
+    for u in users:
+        kb.concepts[u]["requires"].remove(args.id)
+        kb.concepts[u]["updated"] = today()
+    committed = kb.save("kt: rm %s" % args.id)
+    print("removed %s%s" % (args.id, " (committed)" if committed else ""))
+
+
+def cmd_validate(args):
+    errors = KB(kb_dir()).load().validate()
+    for e in errors:
+        print("error  " + e)
+    if errors:
+        sys.exit(1)
+    print("ok")
+
+
+# --------------------------------------------------------------- parser ---
 
 def build_parser():
-    p = argparse.ArgumentParser(prog="kt", description="knowledge-track: inventory of what you know and how well.")
-    sub = p.add_subparsers(dest="command", metavar="<command>")
-    sub.required = True
+    p = argparse.ArgumentParser(prog="kt", description="Track what the user knows and how well.")
+    sub = p.add_subparsers(dest="cmd", required=True)
 
-    def add(name, func, help, json_flag=False, threshold=False):
+    def add(name, fn, help):
         sp = sub.add_parser(name, help=help, description=help)
-        sp.set_defaults(func=func)
-        if json_flag:
-            sp.add_argument("--json", action="store_true", help="machine-readable output")
-        if threshold:
-            sp.add_argument("--threshold", type=int, default=3, metavar="N",
-                            help="level at which a concept counts as known (default 3)")
+        sp.set_defaults(fn=fn)
         return sp
 
-    add("init", cmd_init, "create the knowledge base directory and git repo (safe to re-run)")
-    sp = add("remote", cmd_remote, "set the git remote and push once (network)")
-    sp.add_argument("url")
-    add("sync", cmd_sync, "git pull --rebase then push (network)")
-    add("status", cmd_status, "counts and git state from local refs", json_flag=True)
-    add("index", cmd_index, "rebuild index.json")
-    sp = add("lint", cmd_lint, "validate the whole knowledge base", json_flag=True)
-    sp.add_argument("ids", nargs="*", help="only report findings about these ids")
+    def json_flag(sp):
+        sp.add_argument("--json", action="store_true", help="machine-readable output")
 
-    sp = add("add", cmd_add, "create a concept")
-    sp.add_argument("id")
-    sp.add_argument("--title", required=True)
-    sp.add_argument("--kind", required=True, choices=KINDS)
-    sp.add_argument("--level", required=True, type=int, choices=range(6), metavar="0-5")
-    sp.add_argument("--evidence", action="append", metavar="'<date> <kind>: <note>'",
-                    help="repeatable; kinds: " + ", ".join(EVIDENCE_KINDS))
-    sp.add_argument("--requires", action="append", metavar="a,b")
-    sp.add_argument("--part-of", dest="part_of", action="append", metavar="a,b")
-    sp.add_argument("--related", action="append", metavar="a,b")
-    sp.add_argument("--contrasts-with", dest="contrasts_with", action="append", metavar="a,b")
-    sp.add_argument("--alias", action="append", metavar="A")
-    sp.add_argument("--tag", action="append", metavar="T")
-    g = sp.add_mutually_exclusive_group()
-    g.add_argument("--body", metavar="TEXT", help="definition in your own words; '-' reads stdin")
-    g.add_argument("--body-file", dest="body_file", metavar="FILE")
+    add("init", cmd_init, "create the knowledge base (safe to re-run)")
 
-    sp = add("show", cmd_show, "render one concept", json_flag=True, threshold=True)
+    sp = add("set", cmd_set, "create or update a concept; list flags append")
     sp.add_argument("id")
-    sp = add("get", cmd_get, "one concept as JSON with derived fields", threshold=True)
+    sp.add_argument("--name")
+    sp.add_argument("--level", type=int, choices=sorted(LEVELS))
+    sp.add_argument("--note", help="why the level is what it is")
+    sp.add_argument("--alias", action="append")
+    sp.add_argument("--tag", action="append")
+    sp.add_argument("--requires", action="append")
+    sp.add_argument("--clear", action="append", metavar="FIELD", help="empty a list field before appending")
+    sp.add_argument("--new", action="store_true", help="create even if a similar concept exists")
+
+    sp = add("get", cmd_get, "show one concept with dependents and gaps")
     sp.add_argument("id")
-    add("list", cmd_list, "list all concepts", json_flag=True)
-    sp = add("query", cmd_query, "filter concepts", json_flag=True)
-    sp.add_argument("--level", metavar="'<3'", help="operator and level, e.g. '<3', '>=2', '=0'")
-    sp.add_argument("--kind", choices=KINDS)
-    sp.add_argument("--tag")
-    sp.add_argument("--requires-of", dest="requires_of", metavar="ID", help="direct prerequisites of ID")
-    sp.add_argument("--required-by", dest="required_by", metavar="ID", help="concepts that require ID")
-    sp.add_argument("--part-of", dest="part_of", metavar="ID", help="direct members of ID")
-    sp.add_argument("--unresolved", action="store_true", help="concepts with a relation target that does not exist")
-    sp = add("check", cmd_check, "look up terms; unknown terms are level 0", json_flag=True, threshold=True)
+    sp.add_argument("--threshold", type=int, default=2)
+    json_flag(sp)
+
+    sp = add("check", cmd_check, "look up terms by id, name, or alias; suggests near matches")
     sp.add_argument("terms", nargs="+")
-    sp.add_argument("--resolve", action="store_true", help="also fuzzy-match ids, aliases and titles")
-    sp = add("graph", cmd_graph, "print the relation graph", json_flag=True)
-    g = sp.add_mutually_exclusive_group()
-    g.add_argument("--mermaid", action="store_true", help="mermaid output (default)")
-    g.add_argument("--dot", action="store_true", help="graphviz dot output")
-    sp.add_argument("--relation", choices=DAG_RELATIONS)
+    json_flag(sp)
 
-    sp = add("set", cmd_set, "set fields: key=value ... (lists comma-separated; evidence= repeatable)")
-    sp.add_argument("id")
-    sp.add_argument("assignments", nargs="+", metavar="key=value")
-    sp = add("add-evidence", cmd_add_evidence, "append an evidence line")
-    sp.add_argument("id")
-    sp.add_argument("evidence", metavar="'<date> <kind>: <note>'")
-    sp.add_argument("--level", type=int, choices=range(6), metavar="0-5")
-    sp = add("link", cmd_link, "add a relation (symmetric ones are written on both sides)")
-    sp.add_argument("a")
-    sp.add_argument("relation", choices=ID_LIST_KEYS)
-    sp.add_argument("b")
-    sp = add("unlink", cmd_unlink, "remove a relation")
-    sp.add_argument("a")
-    sp.add_argument("relation", choices=ID_LIST_KEYS)
-    sp.add_argument("b")
-    sp = add("rename", cmd_rename, "rename a concept and rewrite every reference")
-    sp.add_argument("old")
-    sp.add_argument("new")
-    sp = add("rm", cmd_rm, "delete a concept (refuses if referenced)")
-    sp.add_argument("id")
-    sp.add_argument("--force", action="store_true", help="also remove references from other concepts")
+    sp = add("list", cmd_list, "list concepts (first %d unless --all)" % LIST_LIMIT)
+    sp.add_argument("--level", help="e.g. '<2', '>=1', '3'")
+    sp.add_argument("--tag", action="append")
+    sp.add_argument("--all", action="store_true")
+    json_flag(sp)
 
-    sp = add("gaps", cmd_gaps, "transitive prerequisites of ID below the threshold", json_flag=True, threshold=True)
+    sp = add("gaps", cmd_gaps, "transitive prerequisites below a level")
     sp.add_argument("id")
-    add("fringe", cmd_fringe, "concepts below the threshold whose prerequisites are all at or above it",
-        json_flag=True, threshold=True)
+    sp.add_argument("--threshold", type=int, default=2)
+    json_flag(sp)
+
+    sp = add("merge", cmd_merge, "fold SRC into DST: names become aliases, links are rewritten")
+    sp.add_argument("src")
+    sp.add_argument("dst")
+
+    sp = add("dupes", cmd_dupes, "list pairs of concepts that look like duplicates")
+    sp.add_argument("--cutoff", type=float, default=SIMILAR_CUTOFF)
+    sp.add_argument("--all", action="store_true")
+    json_flag(sp)
+
+    sp = add("rm", cmd_rm, "delete a concept")
+    sp.add_argument("id")
+    sp.add_argument("--force", action="store_true", help="also drop links that require it")
+
+    add("validate", cmd_validate, "check the whole file against the schema")
     return p
 
 
 def main(argv=None):
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    args = build_parser().parse_args(argv)
     try:
-        args.func(args)
+        args.fn(args)
     except KtError as e:
         print("kt: %s" % e, file=sys.stderr)
         sys.exit(1)
-    except BrokenPipeError:
-        sys.exit(0)
 
 
 if __name__ == "__main__":

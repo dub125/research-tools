@@ -28,4 +28,4 @@ A Claude Code plugin marketplace for research workflows.
 ## Plugins
 
 - [knowledge-track](plugins/knowledge-track/README.md): global inventory of what
-  you know and how well, with a 0-5 level and evidence per concept.
+  you know and how well, with a 0-3 level and a note per concept.

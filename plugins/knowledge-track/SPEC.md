@@ -1,201 +1,120 @@
 # knowledge-track specification
 
-This file is the authoritative definition of the data format. The `kt` CLI
-implements it; `kt lint` enforces it.
+This file defines the data format. The `kt` CLI implements it and
+`kt validate` enforces it.
 
 ## Model
 
-- Unit: one concept per markdown file, in a flat directory. A concept is atomic
-  if it is assessable with one question. "GNN" is not atomic; "message passing"
-  and "over-smoothing" are.
-- Hierarchy is data, not path. Grouping uses relations, so reorganising never
-  renames files. Ids encode no hierarchy.
-- `kt` is the single writer. It lints before every write and refuses invalid
-  state. Files must not be edited by hand.
+- One record per concept. A concept is anything Claude might put into an
+  experiment design or explanation that the user may or may not understand:
+  a method, tool, theory, or idea. Split a concept when the user could know
+  one part well and another not at all.
+- Grouping is done with `tags`. Prerequisites are done with `requires`. Ids
+  encode no hierarchy.
+- `kt` is the single writer. It validates before every write and refuses
+  invalid state. Anyone may read the file directly.
 
-## Storage layout
+## Storage
 
 Default directory `~/.claude/knowledge/`. The env var `KNOWLEDGE_TRACK_DIR`
 overrides it. The env var `KNOWLEDGE_TRACK_TODAY` (YYYY-MM-DD) overrides the
-date `kt` stamps on writes; it exists mainly for tests.
+date `kt` stamps on writes; it exists for tests.
 
 ```
-~/.claude/knowledge/        # git repo with a remote; cloned on every machine
-  concepts/<id>.md          # one atomic concept per file; id == filename stem
-  config.json               # tracked: {"auto_commit": true, "auto_sync": false}
-  README.md                 # tracked: what this repo is, link to this spec
-  .gitignore                # index.json
-  index.json                # GENERATED, local-only, rebuilt on every write and by `kt index`
+~/.claude/knowledge/
+  concepts.jsonl   # one JSON object per line, sorted by id
+  README.md
   .git/
 ```
 
-Every write is: lint, write, index, `git commit -m "kt: <verb> <id>"`. Nothing
-touches the network except `kt remote` and `kt sync`. `auto_sync` exists in
-`config.json` for a future hook; it defaults to `false` and write commands never
-read it. `kt status` reports ahead/behind from local refs only (no fetch).
+Every write is: validate, atomic rewrite of `concepts.jsonl`, then
+`git commit -m "kt: <verb> <id>"`. `kt` never touches the network. To back up
+or sync, use git directly (`git -C ~/.claude/knowledge push` / `pull`).
 
-## Concept file
+One line per concept, sorted by id, means git diffs and merges work per
+concept. A merge conflict leaves markers in the file; `kt` refuses to read it
+until they are resolved.
 
-```markdown
----
-id: message-passing
-title: Message passing (GNN layer update)
-kind: concept            # concept | method | tool | theory
-level: 3                 # 0-5, see scale
-last_evidenced: 2026-09-14
-aliases: [neighbourhood aggregation]
-tags: [ml, gnn]
-requires: [graph-basics, matrix-multiplication]
-part-of: [graph-neural-networks]
-related: [attention-mechanism]
-contrasts-with: [label-propagation]
-evidence:
-  - "2026-09-14 observed: implemented GCN layer in gnn/main.py"
-  - "2026-06-02 explained-back: described the update rule in own words during review"
-  - "2026-05-20 exposed: Claude walked through Gilmer et al. message passing framework"
-misconceptions:
-  - "2026-05-10 thought aggregation had to be mean; sum/max are valid"
-created: 2026-06-02
-updated: 2026-09-14
----
-One-paragraph definition in the user's own words. Optional notes below.
+## Record
+
+```json
+{"id": "message-passing", "name": "Message passing (GNN)", "level": 2, "aliases": ["MPNN", "neighbourhood aggregation"], "tags": ["gnn"], "requires": ["graph-basics"], "note": "explained the update rule back in own words", "updated": "2026-09-14"}
 ```
 
-## Frontmatter grammar
+| Field | Type | Rule |
+|---|---|---|
+| `id` | string | Required. `^[a-z0-9]+(-[a-z0-9]+)*$`. Unique. |
+| `name` | string | Required. Human-readable name. Defaults to the id with spaces. |
+| `level` | int | Required. 0-3, see scale. |
+| `aliases` | list of strings | Other names for the same concept. |
+| `tags` | list of strings | Free grouping labels. |
+| `requires` | list of ids | Prerequisites: A requires B means B is a prerequisite of A. Must resolve, no self-reference, acyclic. |
+| `note` | string | Why the level is what it is. Required when `level >= 1`. |
+| `updated` | date | Required. Set by `kt` on every write to the record. |
 
-- `key: scalar`
-- `key: [a, b, "c d"]` (flow list)
-- Block list: the key on its own line, then indented `- item` lines. Items are
-  strings, optionally quoted.
-- No nesting. No multi-line scalars.
-- Unknown keys are errors, which keeps the schema explicit.
-- An unquoted scalar may be followed by an inline comment starting with ` #`
-  (space, then hash). The parser strips it. `kt` itself never writes comments.
+Fields at their default value (empty list, empty string) are omitted from the
+file. Unknown fields are errors, so misspellings fail loudly.
 
-## Fields
+History is not stored in the record. Each write is a git commit, so
+`git log -p` on the knowledge repo shows how a level and its note changed.
 
-| Field | Rule |
-|---|---|
-| `id` | Required. `^[a-z0-9]+(-[a-z0-9]+)*$`. Unique. Equals the filename stem. |
-| `title` | Required, non-empty. |
-| `kind` | Required. One of `concept`, `method`, `tool`, `theory`. |
-| `level` | Required integer 0-5. |
-| `evidence` | List of strings matching `^\d{4}-\d{2}-\d{2} (self\|exposed\|explained-back\|observed\|quiz\|taught): .+$`. Must be non-empty when `level >= 1`. |
-| `last_evidenced` | Required when evidence is non-empty; must equal the newest evidence date. |
-| `requires`, `part-of` | Lists of ids. Must resolve. No self-reference. Each relation must be acyclic across the whole KB. |
-| `related`, `contrasts-with` | Lists of ids. Must resolve. No self-reference. Symmetric by convention. |
-| `aliases`, `tags`, `misconceptions` | Optional lists of strings. |
-| `created`, `updated` | Required ISO dates. |
+### Name uniqueness
 
-`created`, `updated`, and `last_evidenced` are maintained by `kt` and may not be
-set directly. `last_evidenced` is always recomputed as the newest evidence date
-on write.
+The normalised forms of every id, name and alias must be unique across the
+knowledge base. Normalising lowercases and turns punctuation, hyphens and runs
+of whitespace into single spaces. So "Over-smoothing", "over smoothing" and
+`over-smoothing` are the same name. This guarantees an exact lookup resolves to
+at most one concept.
 
-There is no `domain` kind. A grouping node is any concept that other concepts
-are `part-of` (derived `has_part` non-empty, `is_group` true). Its own `level`
-describes only its own atomic content (for example "what GNNs are and the
-general framework"), never a rollup of its parts. Rollups over parts are a
-query, never a stored value.
+### Adding a field
 
-### Serialisation
-
-`kt` writes frontmatter keys in this fixed order: id, title, kind, level,
-last_evidenced, aliases, tags, requires, part-of, related, contrasts-with,
-evidence, misconceptions, created, updated. Empty optional lists are omitted.
-`evidence` and `misconceptions` are written as block lists with double-quoted
-items. All other lists are written as flow lists. The order is fixed so diffs
-are stable.
-
-## Evidence kinds
-
-- `self`: the user asserted it, no demonstration.
-- `exposed`: the user was shown or told it (by Claude, a paper, a lecture).
-  Exposure, not competence.
-- `explained-back`: the user explained it in their own words, to Claude or
-  elsewhere.
-- `observed`: the user was seen using it correctly in real work (code,
-  analysis, derivation).
-- `quiz`: the user answered targeted questions about it.
-- `taught`: the user taught it to someone else or produced teaching material.
-
-No policy attaches to kinds yet. The schema only guarantees the distinction is
-recorded.
+Add one line to `FIELDS` in `bin/kt` with its type and default, and document it
+here. Existing records without the field read as the default; no migration is
+needed. Renaming or restructuring a field needs a one-off rewrite of
+`concepts.jsonl`.
 
 ## Level scale
 
-Definitions only; no assessment policy.
-
-| Level | Name | Can-do statement |
+| Level | Name | Meaning |
 |---|---|---|
-| 0 | unknown | No exposure. Default for ids not in the KB. |
-| 1 | aware | Can say what it is and what it's for. |
-| 2 | explain | Can explain the mechanism in own words and answer "why". |
-| 3 | apply | Has used it correctly with inputs and assumptions stated. |
-| 4 | connect | Knows when it fails, compares with alternatives, spots misuse. |
-| 5 | create | Can adapt, extend, or teach it. |
+| 0 | unknown | No meaningful exposure. Also the answer for anything not in the file. |
+| 1 | heard-of | Knows the name and roughly what it is for. |
+| 2 | understands | Can explain how it works and why. |
+| 3 | can-use | Has used it correctly and knows when it breaks. |
 
-## Relations
+## Matching
 
-Four relations. Only `requires` and `part-of` are DAGs. They are separate on
-purpose: being part of GNNs does not make all of GNNs a prerequisite.
+`kt check` resolves a term in two steps:
 
-| Relation | Meaning | Stored |
-|---|---|---|
-| `requires` | A requires B: B is a prerequisite of A. | On A only. Inverse `required_by` is derived. |
-| `part-of` | A is part of B (multi-parent allowed). | On A only. Inverse `has_part` is derived. |
-| `related` | Associated concepts. | Symmetric: both sides. |
-| `contrasts-with` | Commonly confused with. | Symmetric: both sides. |
+1. Exact: the term equals an id, or its normalised form equals a normalised id,
+   name or alias.
+2. Otherwise, up to 3 candidates whose similarity is at least 0.6. Similarity
+   is the larger of character similarity (`difflib` ratio) and word-overlap
+   (Jaccard) between normalised strings.
 
-`kt` writes both sides of symmetric relations. Lint warns when only one side
-exists (possible after hand edits or merges).
+Candidates are suggestions for Claude to judge. `kt` never treats a fuzzy match
+as a match.
 
-## Lint rules
+Creating a concept with `kt set` refuses when an existing concept scores at
+least 0.75 against the new id, name or aliases, unless `--new` is given. A
+synonym should become an alias of the existing concept instead.
+
+## Validation
 
 Errors block writes:
 
-- Conflict markers in a file.
-- Frontmatter does not parse under the grammar above (including nested YAML).
-- Unknown key.
-- Missing or invalid `id`, `title`, `kind`, `level`.
-- `id` does not equal the filename stem, or is not unique.
-- Evidence line not matching the evidence pattern (including unknown kinds).
-- `level >= 1` with empty evidence.
-- `last_evidenced` missing when evidence is non-empty, not equal to the
-  newest evidence date, or present when there is no evidence.
-- Missing or malformed `created` or `updated`.
-- A relation target that does not exist.
-- Self-reference in any relation, or the same id listed twice in one relation.
-- A cycle in `requires` or in `part-of`.
-- An empty string in `aliases`, `tags`, or `misconceptions`.
+- Merge conflict markers or a line that is not a JSON object.
+- Duplicate id.
+- Unknown field, missing required field, or wrong type.
+- `id` not kebab-case, `level` outside 0-3, `updated` not YYYY-MM-DD.
+- `level >= 1` with an empty `note`.
+- Empty or duplicate items in a list field.
+- `requires` naming an unknown id or itself, or a cycle in `requires`.
+- Two concepts sharing a normalised id, name or alias.
 
-Warnings do not block:
+## Deliberately not decided yet
 
-- Empty body.
-- `level >= 3` while a `requires` target has `level < 2`.
-- Orphan: no relations at all, direct or derived.
-- Alias that collides with another concept's id or alias.
-- Symmetric relation present on one side only.
-
-## `index.json`
-
-Generated, local-only (git-ignored), rebuilt on every write and by `kt index`.
-It is a JSON array with one record per concept. Each record holds every
-frontmatter field (lists default to `[]`), the `body`, and derived fields:
-
-- `required_by`: ids whose `requires` contains this id.
-- `has_part`: ids whose `part-of` contains this id.
-- `is_group`: true when `has_part` is non-empty.
-- `file`: path of the concept file relative to the knowledge directory, e.g. `concepts/message-passing.md`.
-
-## Deliberately not decided in this iteration
-
-- How levels get assigned or changed (self-report, observation, assessment).
-- Who may set a level, and verification policy.
-- When Claude consults or prompts about the knowledge base.
-- Decay or effective level over time.
-- Gating hooks and automatic sync.
+- How levels get assigned or changed, and who may change them.
+- When Claude consults the knowledge base or prompts the user (gating).
+- Decay of levels over time (if added, compute it at read time from `updated`).
 - Any learning loop.
-- Bootstrapping concepts from a project.
-
-The schema keeps evidence kinds and `last_evidenced` so these can be built
-without a migration.
