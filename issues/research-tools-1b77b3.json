@@ -13,11 +13,20 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-10-27T02:39:43.225963Z",
-  "updated_at": "2026-10-27T02:39:43.225963Z",
+  "updated_at": "2026-10-27T02:39:52.644137Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
-  "notes": [],
+  "notes": [
+    {
+      "id": "f5cc3428",
+      "at": "2026-10-27T02:39:52.644136Z",
+      "author": "Dylan Wichman/5e2bceba",
+      "text": "Design: summary = required string, the black-box line (what goes in, what comes out, when it is used, without naming parts). part-of = list of ids, same rules as requires (resolve, no self, acyclic in its own graph); an id may not appear in both requires and part-of of one record. kt get shows inverse 'parts'. merge/rm rewrite part-of like requires. gaps ignores part-of (parts are not prerequisites). Backfill the live KB in the same session, because kt on PATH is the working tree.",
+      "commit": "f34c341",
+      "branch": "dev"
+    }
+  ],
   "stamps": {
     "created": {
       "commit": "f34c341",
