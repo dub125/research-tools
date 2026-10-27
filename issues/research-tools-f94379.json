@@ -16,11 +16,20 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-10-27T02:39:43.506546Z",
-  "updated_at": "2026-10-27T02:39:44.300844Z",
+  "updated_at": "2026-10-27T02:39:53.223287Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
-  "notes": [],
+  "notes": [
+    {
+      "id": "c1dd977d",
+      "at": "2026-10-27T02:39:53.223287Z",
+      "author": "Dylan Wichman/5e2bceba",
+      "text": "Passive recording is a production feature, not test-only (Dylan, 2026-10-26). Seed example: user naming a method in an instruction ('use TICA') = at least level 1, not evidence of 2. Draft the rules for Dylan to review before implementing.",
+      "commit": "f34c341",
+      "branch": "dev"
+    }
+  ],
   "stamps": {
     "created": {
       "commit": "f34c341",
