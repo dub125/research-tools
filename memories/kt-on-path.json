@@ -1,0 +1,10 @@
+{
+  "slug": "kt-on-path",
+  "text": "`kt` resolves to `plugins/knowledge-track/bin/kt` in this repo because the plugin is enabled, so a bare `kt` call runs the working-tree version and writes to the real `~/.claude/knowledge`. When experimenting, set `KNOWLEDGE_TRACK_DIR` to a scratch dir and `KNOWLEDGE_TRACK_TODAY` to pin dates.",
+  "created_at": "2026-10-27T00:14:03.220954Z",
+  "updated_at": "2026-10-27T00:14:03.220954Z",
+  "stamp": {
+    "commit": "410635f",
+    "branch": "dev"
+  }
+}
