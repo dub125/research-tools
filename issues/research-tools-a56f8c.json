@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-a56f8c",
+  "title": "Fill install placeholders in README with the GitHub URL",
+  "body": "Both READMEs use `<path-or-git-url-to-this-repo>` as the install placeholder. The remote is https://github.com/dub125/research-tools, so `/plugin marketplace add dub125/research-tools` should work once main is pushed.",
+  "type": "chore",
+  "status": "open",
+  "priority": 3,
+  "labels": [],
+  "parent": null,
+  "blocked_by": [
+    "research-tools-71a8fe"
+  ],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-10-27T00:13:54.909785Z",
+  "updated_at": "2026-10-27T00:13:54.909785Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "410635f",
+      "branch": "dev"
+    },
+    "closed": null
+  }
+}
