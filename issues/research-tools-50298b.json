@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-50298b",
+  "title": "Decide how levels are assigned or changed, and who may change them",
+  "body": "",
+  "type": "decision",
+  "status": "open",
+  "priority": 3,
+  "labels": [
+    "knowledge-track"
+  ],
+  "parent": "research-tools-55c5ed",
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-10-27T00:13:55.444083Z",
+  "updated_at": "2026-10-27T00:13:55.444083Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "410635f",
+      "branch": "dev"
+    },
+    "closed": null
+  }
+}
