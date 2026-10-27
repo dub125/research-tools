@@ -8,14 +8,15 @@
   "labels": [],
   "parent": "research-tools-55c5ed",
   "blocked_by": [
-    "research-tools-0ccb28"
+    "research-tools-0ccb28",
+    "research-tools-1b77b3"
   ],
   "related": [],
   "assignee": null,
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-10-27T02:39:43.506546Z",
-  "updated_at": "2026-10-27T02:39:43.506546Z",
+  "updated_at": "2026-10-27T02:39:44.300844Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
