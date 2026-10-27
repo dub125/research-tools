@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-d02b60",
+  "title": "Audit pass + kt split/rename, from observation data",
+  "body": "",
+  "type": "feature",
+  "status": "open",
+  "priority": 4,
+  "labels": [],
+  "parent": null,
+  "blocked_by": [
+    "research-tools-746254"
+  ],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-10-27T02:39:44.060389Z",
+  "updated_at": "2026-10-27T02:39:44.060389Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "f34c341",
+      "branch": "dev"
+    },
+    "closed": null
+  }
+}
