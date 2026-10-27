@@ -13,11 +13,20 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-10-27T00:13:54.104594Z",
-  "updated_at": "2026-10-27T00:13:54.104594Z",
+  "updated_at": "2026-10-27T00:18:07.271821Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
-  "notes": [],
+  "notes": [
+    {
+      "id": "1da6c63d",
+      "at": "2026-10-27T00:18:07.27182Z",
+      "author": "Dylan Wichman/5e2bceba",
+      "text": "Dylan (2026-10-26): hold the merge/push until knowledge-track has real logic built in, i.e. the policy layer (research-tools-55c5ed), not just storage + CLI.",
+      "commit": "f34c341",
+      "branch": "dev"
+    }
+  ],
   "stamps": {
     "created": {
       "commit": "410635f",
