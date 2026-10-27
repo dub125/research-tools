@@ -15,7 +15,7 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-10-27T00:13:55.444083Z",
-  "updated_at": "2026-10-27T00:23:33.961515Z",
+  "updated_at": "2026-10-27T02:32:22.887984Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
@@ -25,6 +25,14 @@
       "at": "2026-10-27T00:23:33.961514Z",
       "author": "Dylan Wichman/5e2bceba",
       "text": "Decided (Dylan, 2026-10-26): knowledge is atomic. A record like 'understands GNNs' is too coarse to gate on. Fields (GNNs) are tags, not leveled concepts. Brainstorm context: levels exist to gate experiment design; each design marks concepts load-bearing / operational / incidental with a required level; a gap is resolved by learn / substitute / accept-gap (an override never changes a level); Claude explaining is not evidence; note records the source (self-report vs explained back). Still open: atom definition, lazy creation, what to do with the existing graph-neural-networks record.",
+      "commit": "f34c341",
+      "branch": "dev"
+    },
+    {
+      "id": "de8b4151",
+      "at": "2026-10-27T02:32:22.887983Z",
+      "author": "Dylan Wichman/5e2bceba",
+      "text": "Decided (Dylan, 2026-10-26): concept structure is automatic. Claude creates concepts without user approval; consistency comes from written creation tests + a reference example (MSM/TPT tree) in SPEC, kt validation (proposed required summary field, part-of back), and an after-the-fact audit. A concept is a self-contained black box with a level on its outside; inner parts are their own concepts linked part-of; requires = real prerequisite. Friction belongs on the user's understanding (levels/gate), not on bookkeeping.",
       "commit": "f34c341",
       "branch": "dev"
     }
