@@ -13,11 +13,20 @@
   "lease_expires": "2026-10-28T20:58:48.811686718Z",
   "defer_until": null,
   "created_at": "2026-10-28T20:43:43.401293344Z",
-  "updated_at": "2026-10-28T20:43:48.811686718Z",
+  "updated_at": "2026-10-28T20:46:42.076968172Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
-  "notes": [],
+  "notes": [
+    {
+      "id": "8d25ecf4",
+      "at": "2026-10-28T20:46:42.07696701Z",
+      "author": "Dylan Wichman/c39f08f2",
+      "text": "Added nb retract (gated, supports/contradicts only, reason logged) instead of loosening unlink: unlink stays draft-only so routine edits can't rewrite evidence. Found and fixed with it: sync's list union resurrected links removed on one side; lists now merge as sets. Commit on nb-dev.",
+      "commit": "441948a",
+      "branch": "nb-dev"
+    }
+  ],
   "stamps": {
     "created": {
       "commit": "dc821ad",
