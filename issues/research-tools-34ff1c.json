@@ -1,0 +1,28 @@
+{
+  "id": "research-tools-34ff1c",
+  "title": "nb retract: gated removal of a mistaken supports/contradicts link",
+  "body": "",
+  "type": "feature",
+  "status": "open",
+  "priority": 1,
+  "labels": [],
+  "parent": "research-tools-fe12ca",
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-10-28T20:43:43.401293344Z",
+  "updated_at": "2026-10-28T20:43:43.401293344Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "dc821ad",
+      "branch": "nb-dev"
+    },
+    "closed": null
+  }
+}
