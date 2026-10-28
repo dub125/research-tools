@@ -3,20 +3,20 @@
   "title": "nb retract: gated removal of a mistaken supports/contradicts link",
   "body": "",
   "type": "feature",
-  "status": "in_progress",
+  "status": "closed",
   "priority": 1,
   "labels": [],
   "parent": "research-tools-fe12ca",
   "blocked_by": [],
   "related": [],
   "assignee": "Dylan Wichman/c39f08f2",
-  "lease_expires": "2026-10-28T20:58:48.811686718Z",
+  "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-10-28T20:43:43.401293344Z",
-  "updated_at": "2026-10-28T20:46:42.076968172Z",
-  "closed_at": null,
-  "close_reason": null,
-  "resolution": null,
+  "updated_at": "2026-10-28T20:46:42.115014762Z",
+  "closed_at": "2026-10-28T20:46:42.115014762Z",
+  "close_reason": "nb retract + set-merge fix committed; 123 tests pass",
+  "resolution": "done",
   "notes": [
     {
       "id": "8d25ecf4",
@@ -32,6 +32,9 @@
       "commit": "dc821ad",
       "branch": "nb-dev"
     },
-    "closed": null
+    "closed": {
+      "commit": "441948a",
+      "branch": "nb-dev"
+    }
   }
 }
