@@ -3,7 +3,7 @@
   "title": "lab-notebook phase 1: nb core (store, CAS, commands, lint, prime, sync, tests)",
   "body": "",
   "type": "task",
-  "status": "in_progress",
+  "status": "closed",
   "priority": 1,
   "labels": [],
   "parent": "research-tools-fe12ca",
@@ -12,13 +12,13 @@
   ],
   "related": [],
   "assignee": "Dylan Wichman/c39f08f2",
-  "lease_expires": "2026-10-28T17:19:39.350372712Z",
+  "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-10-28T16:19:48.225507293Z",
-  "updated_at": "2026-10-28T17:15:01.485211645Z",
-  "closed_at": null,
-  "close_reason": null,
-  "resolution": null,
+  "updated_at": "2026-10-28T17:32:31.43673187Z",
+  "closed_at": "2026-10-28T17:32:31.43673187Z",
+  "close_reason": "nb core committed on nb-dev; 117 tests pass (3 consecutive runs), fixture replays with no lint errors, plugin validate passes.",
+  "resolution": "done",
   "notes": [
     {
       "id": "fa94ac5d",
@@ -34,6 +34,9 @@
       "commit": "05ac9d4",
       "branch": "dev"
     },
-    "closed": null
+    "closed": {
+      "commit": "0c80602",
+      "branch": "nb-dev"
+    }
   }
 }
