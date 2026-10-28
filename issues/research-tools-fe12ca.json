@@ -13,11 +13,20 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-10-28T16:19:48.15711956Z",
-  "updated_at": "2026-10-28T16:19:48.15711956Z",
+  "updated_at": "2026-10-28T16:19:57.122844131Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
-  "notes": [],
+  "notes": [
+    {
+      "id": "fe783f0b",
+      "at": "2026-10-28T16:19:57.12284349Z",
+      "author": "Dylan Wichman/c39f08f2",
+      "text": "Plan: /home/exouser/.claude/plans/hidden-wondering-truffle.md. Decided with user 2026-10-28: storage on git ref refs/notebook/data (one JSON file per node, CAS update-ref like foam); add decision node type; after-run injection = facts first + brief labeled read, no recording/launching; scope SPEC + phases 1-2 then validate on BioEmu. Plugins cannot ship permission rules, so freeze/confirm gating is a plugin PreToolUse hook returning ask. Author from CLAUDECODE env.",
+      "commit": "05ac9d4",
+      "branch": "dev"
+    }
+  ],
   "stamps": {
     "created": {
       "commit": "05ac9d4",
