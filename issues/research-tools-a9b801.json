@@ -1,0 +1,28 @@
+{
+  "id": "research-tools-a9b801",
+  "title": "lab-notebook phase 1: nb core (store, CAS, commands, lint, prime, sync, tests)",
+  "body": "",
+  "type": "task",
+  "status": "open",
+  "priority": 1,
+  "labels": [],
+  "parent": "research-tools-fe12ca",
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-10-28T16:19:48.225507293Z",
+  "updated_at": "2026-10-28T16:19:48.225507293Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "05ac9d4",
+      "branch": "dev"
+    },
+    "closed": null
+  }
+}
