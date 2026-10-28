@@ -2,7 +2,7 @@
 """PreToolUse gate for lab-notebook.
 
 Reads the hook input on stdin. For Bash commands that run a gated `nb` verb
-(freeze, confirm, invalidate, config set) or that unset or clear CLAUDECODE,
+(freeze, confirm, invalidate, retract, config set) or that unset or clear CLAUDECODE,
 it prints a permissionDecision of "ask" so the user approves the step. Every
 other call passes through with no output.
 
@@ -17,12 +17,13 @@ import re
 import subprocess
 import sys
 
-GATED = re.compile(r"(?:^|[\s;&|()`'\"/])nb\s+(freeze|confirm|invalidate|config\s+set)\b((?:\s+[^\s;&|()`]+)*)")
+GATED = re.compile(r"(?:^|[\s;&|()`'\"/])nb\s+(freeze|confirm|invalidate|retract|config\s+set)\b((?:\s+[^\s;&|()`]+)*)")
 UNSETS = re.compile(r"(-u\s*CLAUDECODE\b|\bunset\b[^;&|\n]*\bCLAUDECODE\b|\bCLAUDECODE=|\benv\s+(?:-\S+\s+)*-i\b)")
 WHY = {
     "freeze": "approves this experiment design; after freezing its spec and predictions cannot change",
     "confirm": "turns a pending proposal into an established part of the record",
     "invalidate": "withdraws a result from the record",
+    "retract": "removes a piece of evidence (a supports or contradicts link) from the record",
     "config set": "changes the notebook's thresholds or run gating",
 }
 NB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "nb")

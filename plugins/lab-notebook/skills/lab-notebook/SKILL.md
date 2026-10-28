@@ -18,7 +18,8 @@ or the run directory, and the notebook stores references to them.
 ## Rules
 
 - **The user approves, you propose.** `nb freeze` (approving a design),
-  `nb confirm` (establishing a pending claim), `nb invalidate` and
+  `nb confirm` (establishing a pending claim), `nb invalidate`,
+  `nb retract` (removing a mistaken supports/contradicts link) and
   `nb config set` are the user's decisions. Run them only when the user asks
   you to; Claude Code will ask them to approve. Never freeze an experiment you
   designed in the same breath as proposing it.

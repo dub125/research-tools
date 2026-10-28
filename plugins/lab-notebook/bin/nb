@@ -1099,6 +1099,20 @@ def cmd_invalidate(args):
     print("invalidated %s" % write(lambda nid: "nb: invalidate %s" % nid, apply))
 
 
+def cmd_retract(args):
+    def apply(g):
+        a, b = g.resolve(args.source), g.resolve(args.target)
+        n = g.nodes[a]
+        before = len(n["links"])
+        n["links"] = [l for l in n["links"] if not (l["rel"] == args.rel and l["to"] == b)]
+        if len(n["links"]) == before:
+            raise NbError("%s has no %s link to %s" % (a, args.rel, b))
+        g.touch(n, "retract", to="%s %s" % (args.rel, b), reason=args.reason)
+        return a, args.rel, b
+
+    print("retracted %s %s %s" % write(lambda r: "nb: retract %s %s %s" % r, apply))
+
+
 def cmd_config(args):
     if args.action == "get":
         g = read()
@@ -1492,10 +1506,13 @@ def merge_nodes(base, ours, theirs):
                 elif tk == bk:
                     v = ok
                 elif k in APPEND_LISTS and all(isinstance(x, list) for x in (bk or [], ok or [], tk or [])):
+                    # set merge: keep what either side added, drop what either side removed (unlink, retract)
+                    bs, os_, ts = ({canonical(x) for x in l or []} for l in (bk, ok, tk))
                     v, seen = [], set()
                     for x in (bk or []) + (ok or []) + (tk or []):
-                        if canonical(x) not in seen:
-                            seen.add(canonical(x))
+                        c = canonical(x)
+                        if c not in seen and (c in os_ and c in ts if c in bs else True):
+                            seen.add(c)
                             v.append(x)
                 elif k == "updated":
                     v = max(ok or "", tk or "")
@@ -1664,6 +1681,12 @@ def build_parser():
 
     sp = add("invalidate", cmd_invalidate, "withdraw a result")
     sp.add_argument("id")
+    sp.add_argument("--reason", required=True)
+
+    sp = add("retract", cmd_retract, "remove a mistaken supports/contradicts link from any node")
+    sp.add_argument("source")
+    sp.add_argument("rel", choices=["contradicts", "supports"])
+    sp.add_argument("target")
     sp.add_argument("--reason", required=True)
 
     sp = add("config", cmd_config, "read or change notebook config")

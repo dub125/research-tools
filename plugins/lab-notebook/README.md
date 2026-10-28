@@ -65,10 +65,11 @@ checks the whole graph. Every read command takes `--json`.
 
 `author` is recorded from the environment: commands run by Claude (inside
 Claude Code's Bash tool) are `claude`, everything else is `user`. Goals,
-conclusions, leads and decisions that Claude adds start `pending`. Four
+conclusions, leads and decisions that Claude adds start `pending`. Five
 commands are yours to approve: `nb freeze` (approve an experiment design),
-`nb confirm` (establish a pending node), `nb invalidate` (withdraw a result)
-and `nb config set`. A PreToolUse hook makes Claude Code ask you before
+`nb confirm` (establish a pending node), `nb invalidate` (withdraw a result),
+`nb retract` (remove a mistaken supports/contradicts link) and
+`nb config set`. A PreToolUse hook makes Claude Code ask you before
 Claude runs any of them, showing what you would be approving (for a freeze:
 the predictions and decision rules). Per the Claude Code docs a hook's "ask"
 still prompts in auto mode; in bypass mode (`--dangerously-skip-permissions`)

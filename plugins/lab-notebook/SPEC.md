@@ -66,8 +66,10 @@ does, with a migration function in `bin/nb`.
    against `git merge-base`, node by node:
    - a node changed on one side only takes that side;
    - a node changed on both sides is merged field by field. Append-only lists
-     (`log`, `links`, `refs`, `deviations`, `runs`) are unioned, keeping the
-     base order and then each side's new entries. A scalar changed on one side
+     (`log`, `links`, `refs`, `tags`, `deviations`, `runs`) are merged as
+     sets: an entry either side added is kept, an entry either side removed
+     (`unlink`, `retract`) stays removed, in base order and then each side's
+     new entries. A scalar changed on one side
      takes that side. A scalar changed differently on both sides is a
      conflict.
 3. On any conflict, or if the merged graph fails validation, nothing is
@@ -281,6 +283,10 @@ CLI.
   for the user to act on.
 - **Unlinking** is allowed only while the source node is in its initial
   status (draft, open, pending), and never for the required links above.
+  A mistaken `supports` or `contradicts` link on any node (a result, an
+  established conclusion) is removed with `nb retract`, which is gated and
+  records the reason in the node's log. Removing a link that a node requires
+  is refused like any other write that introduces a validation error.
 
 ## Authorship
 
@@ -301,6 +307,7 @@ so when Claude runs them the user must approve:
 | `nb freeze` | Approving an experiment design. Claude cannot approve its own, so it cannot chain experiments. |
 | `nb confirm` | Making a pending goal, conclusion, lead or decision established. |
 | `nb invalidate` | Withdrawing a result. |
+| `nb retract` | Withdrawing a piece of evidence (a `supports` or `contradicts` link). |
 | `nb config set` | Changing thresholds and run-gating patterns. |
 
 Plugins cannot ship permission rules, so the gate is a plugin PreToolUse hook
@@ -421,6 +428,7 @@ their names and types.
 | `nb confirm <id>` | Establish a pending node; apply its supersessions. Gated. |
 | `nb reject <id> --reason R` | Reject a pending node (`rejected`, or `dropped` for a lead). |
 | `nb invalidate <res> --reason R` | Invalidate a result. Gated. |
+| `nb retract <from> supports\|contradicts <to> --reason R` | Remove a mistaken evidence link from any node; logged. Gated. |
 | `nb config set <key> <value>` | Change config. Gated. |
 
 ### Read

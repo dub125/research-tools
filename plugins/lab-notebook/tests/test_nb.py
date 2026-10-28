@@ -1423,6 +1423,22 @@ class TestConcurrency(NbCase):
 
 # ========================================================= 16 sync ===
 
+class TestRetract(SnapCase):
+    def test_retract_evidence_link(self):
+        d = self.d
+        self.ok("link", d["r"], "supports", d["h"])
+        self.assertIn("only be removed", self.fails("unlink", d["r"], "supports", d["h"]))  # still refused on a result
+        self.fails("retract", d["r"], "supports", d["h"])  # --reason required
+        self.fails("retract", d["r"], "produces", d["h"], "--reason", "x")  # only evidence links
+        self.assertIn("no contradicts", self.fails("retract", d["r"], "contradicts", d["h"], "--reason", "x"))
+        self.ok("retract", d["r"], "supports", d["h"], "--reason", "backfill bug")
+        n = self.show(d["r"])
+        self.assertNotIn({"rel": "supports", "to": d["h"]}, n.get("links", []))
+        self.assertEqual((n["log"][-1]["event"], n["log"][-1]["to"], n["log"][-1]["reason"]),
+                         ("retract", "supports " + d["h"], "backfill bug"))
+        self.assertEqual(n["status"], "valid")
+
+
 class TestSync(NbCase):
     def two_clones(self):
         """origin (bare), self.repo (A) and a clone (B), both holding a goal and a question."""
@@ -1497,6 +1513,19 @@ class TestSync(NbCase):
         self.ok_in(B, "sync")
         n = json.loads(self.ok_in(B, "show", d1, "--json"))
         self.assertEqual({(l["rel"], l["to"]) for l in n["links"]}, {("affects", self.q), ("affects", g2)})
+
+    def test_removed_link_stays_removed(self):
+        B = self.two_clones()
+        q2 = self.add("question", "Q2?", "--link", "refines:" + self.g, "--link", "refines:" + self.q)
+        q3 = self.add("question", "Q3?", "--link", "refines:" + self.g)
+        self.ok("sync")
+        self.ok_in(B, "sync")
+        self.ok("link", q2, "refines", q3)  # A adds a link while B removes another
+        self.ok_in(B, "unlink", q2, "refines", self.q)
+        self.ok("sync")
+        self.ok_in(B, "sync")
+        n = json.loads(self.ok_in(B, "show", q2, "--json"))
+        self.assertEqual({(l["rel"], l["to"]) for l in n["links"]}, {("refines", self.g), ("refines", q3)})
 
     def test_scalar_conflict_stops_and_resolves(self):
         B = self.two_clones()
@@ -1653,6 +1682,7 @@ class TestGate(NbCase):
     def test_gated_verbs_ask(self):
         for cmd in ["nb freeze exp-abcd", "nb confirm con-abcd", "nb invalidate res-abcd --reason r",
                     "nb config set drift_leads 3", "cd sub && nb confirm con-abcd",
+                    "nb retract res-abcd supports hyp-abcd --reason r",
                     "ls; nb freeze exp-abcd", "/opt/x/bin/nb freeze exp-abcd",
                     "python3 plugins/lab-notebook/bin/nb confirm con-abcd", "echo y | nb freeze exp-abcd"]:
             self.assertIsNotNone(self.gate(cmd), cmd)
