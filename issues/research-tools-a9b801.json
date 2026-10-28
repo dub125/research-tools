@@ -15,11 +15,20 @@
   "lease_expires": "2026-10-28T17:19:39.350372712Z",
   "defer_until": null,
   "created_at": "2026-10-28T16:19:48.225507293Z",
-  "updated_at": "2026-10-28T17:04:39.350372712Z",
+  "updated_at": "2026-10-28T17:15:01.485211645Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
-  "notes": [],
+  "notes": [
+    {
+      "id": "fa94ac5d",
+      "at": "2026-10-28T17:15:01.485210814Z",
+      "author": "Dylan Wichman/c39f08f2",
+      "text": "bin/nb written (single stdlib file). Fixture replays fully (69 nodes, no lint errors, prime 1737 chars). Sync tested by hand with two clones + bare remote: merge, tag union, scalar conflict reported with nothing written. Fixed: nb init in a fresh clone now adopts origin's notebook (it used to create a second root and merge unrelated histories). Model change from the fixture: spawns now allows lead -> experiment/exploration (a lead can be followed by a new experiment on an existing hypothesis, e.g. committor v2). Perf at 2000 nodes: reads 0.2 s, prime 0.4 s, write 0.34 s. Test suite being written by a sub-agent.",
+      "commit": "6b2bbec",
+      "branch": "nb-dev"
+    }
+  ],
   "stamps": {
     "created": {
       "commit": "05ac9d4",
