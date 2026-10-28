@@ -13,7 +13,7 @@
   "lease_expires": "2026-10-28T16:34:57.093446139Z",
   "defer_until": null,
   "created_at": "2026-10-28T16:19:48.192591835Z",
-  "updated_at": "2026-10-28T16:23:31.487432495Z",
+  "updated_at": "2026-10-28T16:54:41.490672177Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
@@ -23,6 +23,14 @@
       "at": "2026-10-28T16:23:31.487431583Z",
       "author": "Dylan Wichman/c39f08f2",
       "text": "SPEC.md written (plugins/lab-notebook/SPEC.md). Choices beyond the plan: goals also start pending when Claude-authored (otherwise Claude could add a goal to justify an experiment); no supersede command, supersession takes effect when the superseding node is established (so it is gated by confirm); added reject command and rejected status for pending goal/conclusion/decision; hypothesis supported/refuted and question answered require a supported conclusion linked to it; nb predict keeps predictions and tests links in step. Fixture being written by a sub-agent.",
+      "commit": "05ac9d4",
+      "branch": "dev"
+    },
+    {
+      "id": "22dc33c5",
+      "at": "2026-10-28T16:54:41.490670674Z",
+      "author": "Dylan Wichman/c39f08f2",
+      "text": "User decisions after reviewing fixture fit notes (2026-10-28): --retro flag for experiments whose predictions were written after results; conclusion confidence, nestable metrics, tags added; post-hoc analysis is a new exploration that 'uses' the result (new edge), not a deviation. Also fixed: links append-only after creation except basis links; lead status 'confirmed' removed; lint warn when a verdict loses its supported conclusion. Fixture revised to 68 nodes. Awaiting user review before phase 1.",
       "commit": "05ac9d4",
       "branch": "dev"
     }
