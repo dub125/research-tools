@@ -272,6 +272,7 @@ STEPS = [
         "--metric", "Brier skill vs constant predictor and mean signed error q_bio - q_md with 95% bootstrap CI over the 32 path microstates",
         "--rule", "[implied; the entry lists metrics but no thresholds] supported if skill vs constant is above 0 and the signed-error CI contains 0"]),
     (None, "user", "2026-10-22", ["freeze", "{E_cmt2}"]),
+    (None, "claude", "2026-10-22", ["link", "{L_v2}", "spawns", "{E_cmt2}"]),
     (None, "user", "2026-10-22", ["status", "{L_v2}", "followed"]),
     ("R_v2", "claude", "2026-10-23", ["result", "{E_cmt2}",
         "f = 0.75, chignolin / Trp-cage / villin, 95% bootstrap CIs over 32 microstates. Brier skill vs constant -0.29 [-0.55, -0.03] / -0.28 [-0.52, -0.03] / -0.28 [-0.55, -0.03]; vs MSM committor -0.77 / -0.76 / -0.78; MD split-half skill vs constant 0.27 / 0.30 / 0.23. Mean signed error q_bio - q_md +0.28 / +0.31 / +0.33. Logistic step x0 0.18 / 0.14 / 0.11 (identity 0.5). Neither core by T: BioEmu2 0.45 / 0.24 / 0.60, MD 0.07 / 0.03 / 0.22. Positive control: first core reached is the start core in 98-100% of rollouts, same as MD. At f = 0.9: skill 0.00 / -0.14 / -0.12, signed error +0.15 / +0.24 / +0.22.",

@@ -35,7 +35,7 @@ tree with `git hash-object -w` and `git mktree`, make a commit with
 `git commit-tree -p <old>`, and move the ref with
 `git update-ref refs/notebook/data <new> <old>`. The last step is a
 compare-and-swap: if another `nb` moved the ref first, the write reloads and
-retries (up to 5 times). There is no lock and no daemon. The commit message is
+retries after a short random wait (up to 30 times). There is no lock and no daemon. The commit message is
 `nb: <verb> <id>`.
 
 Reads are one `git ls-tree -r` and one `git cat-file --batch` over the tree,
@@ -80,7 +80,9 @@ does, with a migration function in `bin/nb`.
 `nb init` adds the fetch refspec to `origin` and appends a delimited block to
 `.git/hooks/pre-push` that runs `nb sync` (skipped when `NB_IN_HOOK` is set,
 never failing the code push). An existing hook, such as foam's, is kept. A
-fresh clone needs `nb init` before the notebook is visible.
+fresh clone needs `nb init` before the notebook is visible; in a clone, `nb
+init` adopts origin's notebook instead of starting a new one. `nb sync`
+pushes with `--no-verify`, so it does not run other pre-push hooks.
 
 ## IDs
 
@@ -134,7 +136,7 @@ An ambiguous prefix is an error that lists the matches.
 | `refs` | list of strings | Opaque references: foam issue ids, URLs, paths, W&B runs. Stored, never parsed. |
 | `tags` | list of strings | Free filtering labels (protein, run family, method). Changeable on any node; `nb query --tag`. |
 | `links` | list of `{rel, to}` | Outgoing edges. See [Edges](#edges). |
-| `log` | list of entries | Append-only history: `{date, author, event, from?, to?, reason?}`. Every status change and every change to a field after creation adds one. |
+| `log` | list of entries | Append-only history: `{date, author, event, from?, to?, field?, reason?}`. Every status change and every change to a field after creation adds one. |
 
 Fields at their default (empty string, empty list, absent) are omitted.
 Unknown fields are errors.
@@ -157,7 +159,7 @@ Unknown fields are errors.
 `goal`, `conclusion`, `lead` and `decision` start `pending` when authored by
 Claude and established (`active`, `supported`, `active`, `active`) when
 authored by the user. A lead that was taken up is `followed` (it raised a
-question or spawned a hypothesis); whether it panned out is told by the
+question or spawned a hypothesis, experiment or exploration); whether it panned out is told by the
 conclusions downstream, not by the lead.
 
 **Experiment and exploration** share one schema. The difference is the
@@ -212,7 +214,7 @@ Edges are stored in the `links` of the node they start from. The CLI keeps
 | `suggested-by` | lead | result, source |
 | `answers` | conclusion | question |
 | `raises` | lead | question |
-| `spawns` | lead | hypothesis |
+| `spawns` | lead | hypothesis, experiment, exploration |
 | `supports`, `contradicts` | result, conclusion, source | hypothesis, conclusion |
 | `audits` | audit | conclusion |
 | `supersedes` | goal, hypothesis, conclusion, decision | same type |
@@ -332,8 +334,9 @@ experiment or exploration; experiment → `tests` → hypothesis; exploration �
 `investigates` → question; hypothesis → `addresses` → question; question →
 `refines` → question or goal. `nb path <id>` prints every such path.
 
-**Lineage** follows how ideas came about: a hypothesis `spawned` by a lead,
-or a question `raised` by a lead, comes from that lead; the lead comes from
+**Lineage** follows how ideas came about: a hypothesis, experiment or
+exploration `spawned` by a lead, or a question `raised` by a lead, comes from
+that lead; the lead comes from
 the results it is `suggested-by`; a result comes from the experiment that
 produced it, which comes from the hypotheses it tests or the question it
 investigates. The drift count of a node is the largest number of leads on any

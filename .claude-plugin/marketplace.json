@@ -12,6 +12,11 @@
       "name": "knowledge-track",
       "source": "./plugins/knowledge-track",
       "description": "Global inventory of what you know and how well"
+    },
+    {
+      "name": "lab-notebook",
+      "source": "./plugins/lab-notebook",
+      "description": "Per-project research record: goals, experiments, results and conclusions as a typed graph"
     }
   ]
 }

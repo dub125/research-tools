@@ -1,0 +1,1730 @@
+#!/usr/bin/env python3
+"""nb: the lab-notebook CLI.
+
+Single writer for the project's research record: a typed graph of goals,
+questions, hypotheses, experiments, results, conclusions, leads, decisions and
+audits, stored on the git ref refs/notebook/data (override with NB_REF), one
+JSON file per node. Nothing is checked out. See SPEC.md in this plugin.
+
+Python 3 stdlib only. Touches the network only in `nb sync`.
+"""
+
+import argparse
+import bisect
+import datetime
+import hashlib
+import json
+import os
+import random
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# ---------------------------------------------------------------- schema ---
+
+SCHEMA = 1
+DEFAULT_REF = "refs/notebook/data"
+ORIGIN_REF = "refs/notebook/origin"
+RETRIES = 30
+LIST_LIMIT = 50
+
+PREFIX = {
+    "goal": "goal", "question": "q", "hypothesis": "hyp", "experiment": "exp",
+    "exploration": "xpl", "result": "res", "conclusion": "con", "lead": "lead",
+    "decision": "dec", "audit": "aud",
+}
+TYPE_OF_PREFIX = {v: k for k, v in PREFIX.items()}
+ID_CHARS = "0123456789abcdefghjkmnpqrstvwxyz"  # no i l o u
+ID_RE = re.compile(r"^(%s)-[%s]{4,}$" % ("|".join(PREFIX.values()), ID_CHARS))
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Statuses per type, initial first. Audits have none.
+STATUSES = {
+    "goal": ["pending", "active", "superseded", "rejected"],
+    "question": ["open", "answered", "settled", "parked", "abandoned"],
+    "hypothesis": ["open", "supported", "refuted", "superseded"],
+    "experiment": ["draft", "frozen", "done", "abandoned"],
+    "exploration": ["draft", "frozen", "done", "abandoned"],
+    "result": ["valid", "invalidated"],
+    "conclusion": ["pending", "supported", "refuted", "superseded", "rejected"],
+    "lead": ["pending", "active", "followed", "dropped"],
+    "decision": ["pending", "active", "superseded", "rejected"],
+}
+# Types that start pending when Claude authors them, and their established status.
+ESTABLISHED = {"goal": "active", "conclusion": "supported", "lead": "active", "decision": "active"}
+REJECTED = {"goal": "rejected", "conclusion": "rejected", "lead": "dropped", "decision": "rejected"}
+INITIAL = {"draft", "open", "pending"}
+
+# Moves allowed through `nb status`. Others happen through freeze, confirm,
+# reject, invalidate and supersession.
+STATUS_MOVES = {
+    "question": {"open": {"answered", "settled", "parked", "abandoned"},
+                 "parked": {"open", "abandoned"}, "answered": {"open"}, "settled": {"open"}},
+    "hypothesis": {"open": {"supported", "refuted"}, "supported": {"refuted"}, "refuted": {"supported"}},
+    "experiment": {"draft": {"abandoned"}, "frozen": {"done", "abandoned"}},
+    "exploration": {"draft": {"abandoned"}, "frozen": {"done", "abandoned"}},
+    "conclusion": {"supported": {"refuted"}},
+    "lead": {"active": {"followed", "dropped"}, "followed": {"dropped"}},
+}
+
+# name -> type. Order is the serialisation order.
+COMMON = {
+    "id": str, "type": str, "title": str, "author": str, "created": str, "updated": str,
+    "status": str, "body": str, "refs": list, "tags": list, "links": list, "log": list,
+}
+RUN_FIELDS = {
+    "spec": str, "execution": str, "predictions": list, "spec_hash": str,
+    "frozen_at": str, "deviations": list, "runs": list,
+}
+TYPE_FIELDS = {
+    "goal": {},
+    "question": {},
+    "hypothesis": {"prediction": str},
+    "experiment": dict({"retrospective": bool}, **RUN_FIELDS),
+    "exploration": {k: v for k, v in RUN_FIELDS.items() if k != "predictions"},
+    "result": {"summary": str, "provenance": dict, "metrics": dict},
+    "conclusion": {"rationale": str, "scope": str, "alternatives": str, "confidence": str, "confirmed_at": str},
+    "lead": {"rationale": str},
+    "decision": {"rationale": str, "rejected": list, "revisit_if": str},
+    "audit": {"verdict": str, "findings": str, "auditor": str, "audited_at": str},
+}
+REQUIRED = {
+    "hypothesis": ["prediction"], "result": ["summary"],
+    "conclusion": ["rationale", "scope", "alternatives"], "lead": ["rationale"],
+    "decision": ["rationale"], "audit": ["verdict", "findings"],
+}
+ENUMS = {
+    "author": {"user", "claude"}, "execution": {"command", "analysis", "manual"},
+    "confidence": {"low", "medium", "high"}, "verdict": {"sound", "concerns", "unsound"},
+}
+PREDICTION_KEYS = ["hypothesis", "prediction", "metric", "decision_rule"]
+SYSTEM_FIELDS = {"id", "type", "author", "created", "updated", "status", "links", "log",
+                 "spec_hash", "frozen_at", "deviations", "runs", "predictions", "provenance",
+                 "metrics", "confirmed_at", "audited_at", "retrospective"}
+APPEND_LISTS = {"log", "links", "refs", "tags", "deviations", "runs"}
+
+SAME = "same"
+EDGES = {
+    "refines": ({"question"}, {"goal", "question"}),
+    "addresses": ({"hypothesis"}, {"question"}),
+    "tests": ({"experiment"}, {"hypothesis"}),
+    "investigates": ({"exploration"}, {"question"}),
+    "produces": ({"experiment", "exploration"}, {"result"}),
+    "derived-from": ({"conclusion"}, {"result"}),
+    "suggested-by": ({"lead"}, {"result", "source"}),
+    "answers": ({"conclusion"}, {"question"}),
+    "raises": ({"lead"}, {"question"}),
+    "spawns": ({"lead"}, {"hypothesis", "experiment", "exploration"}),
+    "supports": ({"result", "conclusion", "source"}, {"hypothesis", "conclusion"}),
+    "contradicts": ({"result", "conclusion", "source"}, {"hypothesis", "conclusion"}),
+    "audits": ({"audit"}, {"conclusion"}),
+    "supersedes": ({"goal", "hypothesis", "conclusion", "decision"}, SAME),
+    "variant-of": ({"experiment", "exploration"}, SAME),
+    "uses": ({"experiment", "exploration"}, {"result"}),
+    "based-on": ({"decision"}, {"result", "conclusion"}),
+    "affects": ({"decision"}, {"goal", "question", "hypothesis", "experiment", "exploration"}),
+}
+ACYCLIC = ["refines", "supersedes", "variant-of"]
+# type -> (rel, min, max) links a node must have from creation on.
+REQUIRED_LINKS = {
+    "question": ("refines", 1, None), "hypothesis": ("addresses", 1, None),
+    "exploration": ("investigates", 1, None), "conclusion": ("derived-from", 1, None),
+    "lead": ("suggested-by", 1, None), "audit": ("audits", 1, 1),
+}
+# Upward edges for "path to a goal" (lint, freeze) and the extra ones `nb path` shows.
+UP = {"experiment": ["tests"], "exploration": ["investigates"],
+      "hypothesis": ["addresses"], "question": ["refines"]}
+UP_EXTRA = {"conclusion": ["answers", "derived-from"], "lead": ["suggested-by"],
+            "decision": ["affects", "based-on"], "audit": ["audits"]}
+
+CONFIG_DEFAULTS = {
+    "prime_max_chars": 4000,
+    "prime_section_limit": 5,
+    "pending_days": 7,
+    "drift_leads": 2,
+    "min_results_supported": 1,
+    "run_patterns": [],
+}
+
+
+class NbError(Exception):
+    pass
+
+
+def today():
+    return os.environ.get("NB_TODAY") or datetime.date.today().isoformat()
+
+
+def author():
+    """claude inside Claude Code's Bash tool, user otherwise. Deliberately no override."""
+    return "claude" if os.environ.get("CLAUDECODE") else "user"
+
+
+def ref_name():
+    return os.environ.get("NB_REF") or DEFAULT_REF
+
+
+# ------------------------------------------------------------------ git ---
+
+def repo_root():
+    res = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if res.returncode != 0:
+        raise NbError("not inside a git repository")
+    return Path(res.stdout.strip())
+
+
+class Git:
+    def __init__(self, root):
+        self.root = root
+
+    def run(self, *args, input=None, env=None, check=True, text=True):
+        res = subprocess.run(["git", "-C", str(self.root)] + list(args), input=input,
+                             capture_output=True, text=text, env=env)
+        if check and res.returncode != 0:
+            err = res.stderr if text else res.stderr.decode(errors="replace")
+            raise NbError("git %s failed: %s" % (args[0], err.strip()))
+        return res
+
+    def ok(self, *args):
+        return self.run(*args, check=False).returncode == 0
+
+    def rev(self, name):
+        res = self.run("rev-parse", "--verify", "-q", name + "^{commit}", check=False)
+        return res.stdout.strip() or None
+
+    def read_tree(self, commit):
+        """{path: (blob sha, bytes)} for every blob under commit."""
+        out = self.run("ls-tree", "-r", "-z", commit).stdout
+        entries = []
+        for item in out.split("\0"):
+            if item:
+                meta, path = item.split("\t", 1)
+                entries.append((path, meta.split()[2]))
+        if not entries:
+            return {}
+        data = self.run("cat-file", "--batch", input="".join(s + "\n" for _, s in entries).encode(),
+                        text=False).stdout
+        blobs, pos = {}, 0
+        for path, sha in entries:
+            nl = data.index(b"\n", pos)
+            size = int(data[pos:nl].split()[2])
+            blobs[path] = (sha, data[nl + 1:nl + 1 + size])
+            pos = nl + 1 + size + 1
+        return blobs
+
+    def hash_blob(self, text):
+        return self.run("hash-object", "-w", "--stdin", input=text).stdout.strip()
+
+    def mktree(self, entries):
+        """entries: [(mode, kind, sha, name)]"""
+        lines = "".join("%s %s %s\t%s\n" % e for e in entries)
+        return self.run("mktree", input=lines).stdout.strip()
+
+    def commit_tree(self, tree, parents, message):
+        env = dict(os.environ)
+        if not self.run("config", "user.name", check=False).stdout.strip():
+            env.update(GIT_AUTHOR_NAME="nb", GIT_COMMITTER_NAME="nb")
+        if not self.run("config", "user.email", check=False).stdout.strip():
+            env.update(GIT_AUTHOR_EMAIL="nb@localhost", GIT_COMMITTER_EMAIL="nb@localhost")
+        args = ["commit-tree", tree]
+        for p in parents:
+            args += ["-p", p]
+        return self.run(*args, "-m", message, env=env).stdout.strip()
+
+    def swap(self, ref, new, old):
+        """Compare-and-swap the ref. False if someone else moved it first."""
+        res = self.run("update-ref", ref, new, old or "", check=False)
+        if res.returncode == 0:
+            return True
+        if "cannot lock ref" in res.stderr or "but expected" in res.stderr or "already exists" in res.stderr:
+            return False
+        raise NbError("git update-ref failed: %s" % res.stderr.strip())
+
+
+# ---------------------------------------------------------------- graph ---
+
+def canonical(obj):
+    return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def spec_hash(n):
+    keys = {k: n.get(k, "" if k != "predictions" else []) for k in ("title", "spec", "execution", "predictions")}
+    return hashlib.sha256(canonical(keys).encode()).hexdigest()
+
+
+def fields_of(t):
+    return dict(COMMON, **TYPE_FIELDS.get(t, {}))
+
+
+def serialise(n):
+    rec = {}
+    for k in fields_of(n.get("type")):
+        if k in n and n[k] not in ("", [], {}, None, False):
+            rec[k] = n[k]
+    for k in n:  # unknown fields survive so validation can report them
+        if k not in rec and n[k] not in ("", [], {}, None, False):
+            rec[k] = n[k]
+    return json.dumps(rec, indent=2, ensure_ascii=False) + "\n"
+
+
+def default(kind):
+    return {str: "", list: [], dict: {}, bool: False}[kind]
+
+
+class Graph:
+    def __init__(self, git, head, meta, nodes, blobs):
+        self.git, self.head, self.meta, self.nodes, self.blobs = git, head, meta, nodes, blobs
+        self._inbound = None
+
+    @classmethod
+    def load(cls, git, commit=None, required=True):
+        commit = commit or git.rev(ref_name())
+        if not commit:
+            if required:
+                raise NbError("no notebook in this repository; run `nb init`")
+            return cls(git, None, {"schema": SCHEMA, "config": {}}, {}, {})
+        meta, nodes, blobs = {"schema": SCHEMA, "config": {}}, {}, {}
+        for path, (sha, data) in git.read_tree(commit).items():
+            try:
+                obj = json.loads(data.decode())
+            except ValueError:
+                raise NbError("%s in the notebook is not valid JSON" % path)
+            if path == "meta.json":
+                meta = obj
+            elif path.startswith("nodes/") and path.endswith(".json"):
+                nodes[obj.get("id", path[6:-5])] = obj
+                blobs[obj.get("id", path[6:-5])] = (data.decode(), sha)
+        if meta.get("schema", 0) > SCHEMA:
+            raise NbError("notebook schema %s is newer than this nb (%d); update the plugin" % (meta["schema"], SCHEMA))
+        meta["schema"] = SCHEMA  # migrations from older schemas go here
+        meta.setdefault("config", {})
+        for n in nodes.values():
+            for k, kind in fields_of(n.get("type")).items():
+                n.setdefault(k, default(kind))
+        return cls(git, commit, meta, nodes, blobs)
+
+    # -- lookup
+
+    def config(self, key):
+        return self.meta["config"].get(key, CONFIG_DEFAULTS[key])
+
+    def resolve(self, term, types=None):
+        if term in self.nodes:
+            nid = term
+        else:
+            hits = sorted(k for k in self.nodes if k.startswith(term))
+            if not hits:
+                raise NbError("no node matching %r" % term)
+            if len(hits) > 1:
+                raise NbError("%r is ambiguous: %s" % (term, ", ".join(hits[:10])))
+            nid = hits[0]
+        if types and self.nodes[nid]["type"] not in types:
+            raise NbError("%s is a %s, expected %s" % (nid, self.nodes[nid]["type"], " or ".join(sorted(types))))
+        return nid
+
+    def type(self, nid):
+        return self.nodes[nid]["type"] if nid in self.nodes else None
+
+    def status(self, nid):
+        return self.nodes[nid].get("status", "") if nid in self.nodes else ""
+
+    def out(self, nid, *rels):
+        return [l["to"] for l in self.nodes[nid]["links"] if l["rel"] in rels]
+
+    @property
+    def inbound(self):
+        if self._inbound is None:
+            idx = {}
+            for nid, n in self.nodes.items():
+                for l in n["links"]:
+                    idx.setdefault(l["to"], []).append((l["rel"], nid))
+            self._inbound = idx
+        return self._inbound
+
+    def into(self, nid, *rels):
+        return [f for r, f in self.inbound.get(nid, []) if r in rels]
+
+    def changed(self):
+        self._inbound = None
+
+    def producer(self, rid):
+        p = self.into(rid, "produces")
+        return p[0] if p else None
+
+    def new_id(self, t):
+        rng = random.SystemRandom()
+        for attempt in range(20):
+            length = 4 if attempt < 10 else 5
+            nid = "%s-%s" % (PREFIX[t], "".join(rng.choice(ID_CHARS) for _ in range(length)))
+            if nid not in self.nodes:
+                return nid
+        raise NbError("could not draw a free id")
+
+    # -- paths and lineage
+
+    def paths(self, nid, extra=False, limit=20):
+        """Every upward path from nid to a goal, as lists of ids."""
+        found = []
+
+        def ups(x):
+            t = self.type(x)
+            if t == "result":
+                return [p for p in [self.producer(x)] if p]
+            rels = UP.get(t, []) + (UP_EXTRA.get(t, []) if extra else [])
+            return [y for y in self.out(x, *rels) if y in self.nodes]
+
+        def walk(x, trail):
+            if len(found) >= limit:
+                return
+            if self.type(x) == "goal":
+                found.append(trail)
+                return
+            for y in ups(x):
+                if y not in trail:
+                    walk(y, trail + [y])
+
+        walk(nid, [nid])
+        return found
+
+    def has_active_goal(self, nid):
+        return any(self.status(p[-1]) == "active" for p in self.paths(nid, limit=200))
+
+    def lineage_parents(self, nid):
+        t = self.type(nid)
+        if t == "hypothesis":
+            return self.into(nid, "spawns") + self.out(nid, "addresses")
+        if t == "question":
+            return self.into(nid, "raises") + [q for q in self.out(nid, "refines") if self.type(q) == "question"]
+        if t == "lead":
+            return self.out(nid, "suggested-by")
+        if t == "result":
+            return self.into(nid, "produces")
+        if t == "experiment":
+            return self.into(nid, "spawns") + self.out(nid, "tests")
+        if t == "exploration":
+            return self.into(nid, "spawns") + self.out(nid, "investigates")
+        return []
+
+    def drift(self, nid, memo=None, stack=()):
+        """Largest number of leads on any lineage chain ending at nid."""
+        memo = {} if memo is None else memo
+        if nid in memo:
+            return memo[nid]
+        best = 0
+        for p in self.lineage_parents(nid):
+            if p in self.nodes and p not in stack:
+                best = max(best, self.drift(p, memo, stack + (nid,)))
+        memo[nid] = best + (1 if self.type(nid) == "lead" else 0)
+        return memo[nid]
+
+    def lineage_leads(self, nid):
+        seen, stack, leads = set(), [nid], []
+        while stack:
+            x = stack.pop()
+            for p in self.lineage_parents(x):
+                if p in self.nodes and p not in seen:
+                    seen.add(p)
+                    if self.type(p) == "lead":
+                        leads.append(p)
+                    stack.append(p)
+        return sorted(leads)
+
+    def retro(self, nid):
+        """Does this node rest on a retrospective experiment?"""
+        t = self.type(nid)
+        if t == "experiment":
+            return bool(self.nodes[nid].get("retrospective"))
+        if t == "result":
+            p = self.producer(nid)
+            return bool(p and self.retro(p))
+        if t == "conclusion":
+            return any(self.retro(r) for r in self.out(nid, "derived-from") if r in self.nodes)
+        return False
+
+    def experiment_basis(self, cid, valid_only=True):
+        """derived-from results of conclusion cid produced by an experiment."""
+        out = []
+        for r in self.out(cid, "derived-from"):
+            if r in self.nodes and self.type(self.producer(r)) == "experiment":
+                if not valid_only or self.status(r) == "valid":
+                    out.append(r)
+        return out
+
+    # -- writing helpers
+
+    def touch(self, n, event, **kw):
+        entry = {"date": today(), "author": author(), "event": event}
+        entry.update({k: v for k, v in kw.items() if v not in (None, "")})
+        n["log"].append(entry)
+        n["updated"] = today()
+        self.changed()
+
+    def set_status(self, nid, new, event, reason=None):
+        n = self.nodes[nid]
+        old = n["status"]
+        n["status"] = new
+        self.touch(n, event, **{"from": old, "to": new, "reason": reason})
+
+    def establish(self, nid, event):
+        """pending (or new) -> established, applying supersessions."""
+        n = self.nodes[nid]
+        t = n["type"]
+        if t == "conclusion":
+            check_conclusion_basis(self, nid)
+            n["confirmed_at"] = self.head or ""
+        if t in ESTABLISHED and n["status"] != ESTABLISHED[t]:
+            self.set_status(nid, ESTABLISHED[t], event)
+        for old in self.out(nid, "supersedes"):
+            if self.status(old) != "superseded":
+                self.set_status(old, "superseded", "superseded", reason="by %s" % nid)
+
+    def add_link(self, nid, rel, to):
+        n = self.nodes[nid]
+        if any(l["rel"] == rel and l["to"] == to for l in n["links"]):
+            raise NbError("%s already %s %s" % (nid, rel, to))
+        n["links"].append({"rel": rel, "to": to})
+        self.changed()
+
+
+def check_conclusion_basis(g, cid):
+    if not g.experiment_basis(cid):
+        raise NbError("%s must derive from at least one valid result of an experiment "
+                      "(results of explorations can only suggest leads)" % cid)
+
+
+# ----------------------------------------------------------- validation ---
+
+def validate(g):
+    """Structural errors as (id, message). Writes refuse to add new ones."""
+    errs = []
+    nodes = g.nodes
+    for nid in sorted(nodes):
+        n = nodes[nid]
+        e = lambda msg: errs.append((nid, msg))
+        t = n.get("type")
+        if t not in TYPE_FIELDS:
+            e("unknown type %r" % t)
+            continue
+        if not ID_RE.match(nid) or TYPE_OF_PREFIX.get(nid.split("-")[0]) != t or n.get("id") != nid:
+            e("bad id for a %s" % t)
+        fields = fields_of(t)
+        for k, v in n.items():
+            if k not in fields:
+                e("unknown field %r" % k)
+            elif not isinstance(v, fields[k]):
+                e("%s should be %s" % (k, fields[k].__name__))
+            elif k in ENUMS and v and v not in ENUMS[k]:
+                e("%s must be one of %s" % (k, ", ".join(sorted(ENUMS[k]))))
+        for k in ["title", "author", "created", "updated"] + REQUIRED.get(t, []):
+            if not n.get(k):
+                e("missing %s" % k)
+        for k in ("created", "updated"):
+            if n.get(k) and not DATE_RE.match(str(n[k])):
+                e("%s is not YYYY-MM-DD" % k)
+        if t == "audit":
+            if n.get("status"):
+                e("audits have no status")
+        elif n.get("status") not in STATUSES[t]:
+            e("status %r is not one of %s" % (n.get("status"), ", ".join(STATUSES[t])))
+        for k in ("refs", "tags", "rejected"):
+            v = n.get(k) or []
+            if isinstance(v, list) and (any(not isinstance(x, str) or not x for x in v) or len(set(v)) != len(v)):
+                e("%s has empty, non-string or duplicate items" % k)
+        for entry in n.get("log") or []:
+            if not isinstance(entry, dict) or not all(entry.get(k) for k in ("date", "author", "event")):
+                e("log entry without date, author and event")
+                break
+        seen = set()
+        for l in n.get("links") or []:
+            if not isinstance(l, dict) or set(l) != {"rel", "to"}:
+                e("malformed link %r" % (l,))
+                continue
+            rel, to = l["rel"], l["to"]
+            if (rel, to) in seen:
+                e("duplicate link %s %s" % (rel, to))
+            seen.add((rel, to))
+            if rel not in EDGES:
+                e("unknown relation %r" % rel)
+                continue
+            frm, tos = EDGES[rel]
+            if to == nid:
+                e("links to itself (%s)" % rel)
+            elif to not in nodes:
+                e("dangling link %s %s" % (rel, to))
+            elif t not in frm:
+                e("a %s cannot have %s links" % (t, rel))
+            elif nodes[to].get("type") not in ({t} if tos == SAME else tos):
+                e("%s cannot point at a %s (%s)" % (rel, nodes[to].get("type"), to))
+        if t in REQUIRED_LINKS:
+            rel, lo, hi = REQUIRED_LINKS[t]
+            k = sum(1 for l in n.get("links") or [] if isinstance(l, dict) and l.get("rel") == rel)
+            if k < lo or (hi and k > hi):
+                e("needs %s %s link%s" % ("exactly %d" % lo if hi == lo else "at least %d" % lo, rel, "" if lo == 1 else "s"))
+        if t in ("experiment", "exploration"):
+            st = n.get("status")
+            if t == "experiment":
+                preds = n.get("predictions") or []
+                bad = [p for p in preds if not isinstance(p, dict) or set(p) != set(PREDICTION_KEYS)]
+                if bad:
+                    e("predictions need exactly the keys %s" % ", ".join(PREDICTION_KEYS))
+                ph = sorted(p.get("hypothesis") for p in preds if isinstance(p, dict))
+                th = sorted(l["to"] for l in n.get("links") or [] if isinstance(l, dict) and l.get("rel") == "tests")
+                if ph != th:
+                    e("predictions and tests links disagree")
+            if st in ("frozen", "done") or n.get("spec_hash"):
+                if not n.get("spec_hash"):
+                    e("%s but never frozen" % st)
+                elif n["spec_hash"] != spec_hash(n):
+                    e("frozen spec was changed (spec_hash mismatch)")
+        if t == "result":
+            prods = [f for r, f in g.inbound.get(nid, []) if r == "produces"]
+            if len(prods) != 1:
+                e("must be produced by exactly one experiment or exploration (has %d)" % len(prods))
+            elif nodes[prods[0]].get("status") == "draft":
+                e("produced by %s, which was never frozen" % prods[0])
+        if t == "conclusion" and n.get("links") and not g.experiment_basis(nid, valid_only=False):
+            e("derives only from exploration results; exploration results can only suggest leads")
+    for rel in ACYCLIC:
+        cyc = find_cycle(g, rel)
+        if cyc:
+            errs.append((cyc[0], "cycle in %s: %s" % (rel, " -> ".join(cyc))))
+    return errs
+
+
+def find_cycle(g, rel):
+    state = {}
+
+    def visit(x, trail):
+        state[x] = 1
+        for y in g.out(x, rel):
+            if y not in g.nodes:
+                continue
+            if state.get(y) == 1:
+                return trail[trail.index(y):] + [y]
+            if not state.get(y):
+                found = visit(y, trail + [y])
+                if found:
+                    return found
+        state[x] = 2
+        return None
+
+    for nid in sorted(g.nodes):
+        if not state.get(nid):
+            found = visit(nid, [nid])
+            if found:
+                return found
+    return None
+
+
+# ---------------------------------------------------------------- store ---
+
+def build_tree(g):
+    entries = []
+    for nid, n in g.nodes.items():
+        text = serialise(n)
+        cached = g.blobs.get(nid)
+        sha = cached[1] if cached and cached[0] == text else g.git.hash_blob(text)
+        entries.append(("100644", "blob", sha, nid + ".json"))
+    root = [("100644", "blob", g.git.hash_blob(json.dumps(g.meta, indent=2, sort_keys=True) + "\n"), "meta.json")]
+    if entries:
+        root.append(("040000", "tree", g.git.mktree(entries), "nodes"))
+    return g.git.mktree(root)
+
+
+def write(message, apply, required=True):
+    """load -> apply -> refuse new validation errors -> commit -> compare-and-swap, retrying."""
+    git = Git(repo_root())
+    for attempt in range(RETRIES):
+        if attempt:
+            time.sleep(random.uniform(0.01, 0.05) * min(attempt, 8))  # jitter so racing writers spread out
+        g = Graph.load(git, required=required)
+        before = set(validate(g))
+        out = apply(g)
+        g.changed()
+        new = [e for e in validate(g) if e not in before]
+        if new:
+            raise NbError("refused, the notebook would be invalid:\n  " +
+                          "\n  ".join("%s: %s" % e for e in new))
+        msg = message(out) if callable(message) else message
+        commit = git.commit_tree(build_tree(g), [g.head] if g.head else [], msg)
+        if git.swap(ref_name(), commit, g.head):
+            return out
+    raise NbError("the notebook ref kept moving under this write; try again")
+
+
+def read():
+    git = Git(repo_root())
+    return Graph.load(git)
+
+
+# --------------------------------------------------------------- output ---
+
+def emit(obj, as_json, lines):
+    if as_json:
+        print(json.dumps(obj, indent=2, ensure_ascii=False))
+    else:
+        for line in lines:
+            print(line)
+
+
+def short(s, n=90):
+    s = " ".join(str(s).split())
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def row(g, nid, width=90):
+    n = g.nodes[nid]
+    marks = (" [retro]" if g.retro(nid) else "")
+    return "%-10s %-11s %-11s %s%s" % (nid, n["type"], n.get("status") or n.get("verdict", ""), short(n["title"], width), marks)
+
+
+def brief(g, nid):
+    n = g.nodes[nid]
+    return {"id": nid, "type": n["type"], "status": n.get("status", ""), "title": n["title"],
+            "author": n["author"], "created": n["created"]}
+
+
+def read_body(value):
+    return sys.stdin.read().strip() if value == "-" else value
+
+
+# ---------------------------------------------------------- write cmds ---
+
+TYPE_FLAGS = {
+    "goal": [], "question": [],
+    "hypothesis": ["prediction"],
+    "experiment": ["spec", "execution", "retro"],
+    "exploration": ["spec", "execution"],
+    "conclusion": ["rationale", "scope", "alternatives", "confidence", "from_"],
+    "lead": ["rationale", "from_"],
+    "decision": ["rationale", "reject", "revisit_if"],
+    "audit": ["of", "verdict", "findings", "auditor"],
+}
+ALL_FLAGS = sorted({f for fs in TYPE_FLAGS.values() for f in fs})
+
+
+def parse_link(g, spec):
+    if ":" not in spec:
+        raise NbError("--link takes REL:ID, got %r" % spec)
+    rel, term = spec.split(":", 1)
+    if rel not in EDGES:
+        raise NbError("unknown relation %r (one of %s)" % (rel, ", ".join(sorted(EDGES))))
+    return rel, g.resolve(term)
+
+
+def cmd_init(args):
+    root = repo_root()
+    git = Git(root)
+    has_origin = git.ok("remote", "get-url", "origin")
+    state = "already exists"
+    if not git.rev(ref_name()) and has_origin:
+        # A fresh clone: adopt origin's notebook rather than starting a second history.
+        if git.ok("fetch", "-q", "origin", "+%s:%s" % (ref_name(), ORIGIN_REF)) and git.rev(ORIGIN_REF):
+            git.swap(ref_name(), git.rev(ORIGIN_REF), None)
+            state = "fetched from origin"
+    if not git.rev(ref_name()):
+        write("nb: init", lambda g: None, required=False)
+        state = "created"
+    print("notebook %s at %s" % (state, ref_name()))
+    if has_origin:
+        spec = "+%s:%s" % (ref_name(), ORIGIN_REF)
+        have = git.run("config", "--get-all", "remote.origin.fetch", check=False).stdout.split()
+        if spec not in have:
+            git.run("config", "--add", "remote.origin.fetch", spec)
+            print("added fetch refspec %s" % spec)
+        hook = Path(git.run("rev-parse", "--git-path", "hooks/pre-push").stdout.strip())
+        if not hook.is_absolute():
+            hook = root / hook
+        install_pre_push(hook)
+
+
+HOOK_BEGIN, HOOK_END = "# >>> nb sync >>>", "# <<< nb sync <<<"
+
+
+def install_pre_push(hook):
+    text = hook.read_text() if hook.exists() else "#!/bin/sh\n"
+    if HOOK_BEGIN in text:
+        return
+    nb = Path(__file__).resolve()
+    block = "\n".join([
+        HOOK_BEGIN,
+        "# Added by `nb init`: sync the lab notebook ref; never blocks the push.",
+        'if [ -z "$NB_IN_HOOK" ]; then',
+        '  NB=$(command -v nb || echo "%s")' % nb,
+        '  [ -x "$NB" ] && { NB_IN_HOOK=1 "$NB" sync --quiet || echo "nb: notebook sync failed (push continues)" >&2; }',
+        "fi",
+        HOOK_END, ""])
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    # Insert before a trailing `exit` of an existing hook so the block still runs.
+    lines = text.rstrip("\n").split("\n")
+    if lines and re.match(r"^\s*exit\b", lines[-1]):
+        text = "\n".join(lines[:-1]) + "\n" + block + lines[-1] + "\n"
+    else:
+        text = text.rstrip("\n") + "\n" + block
+    hook.write_text(text)
+    hook.chmod(0o755)
+    print("added notebook sync to %s" % hook)
+
+
+def cmd_add(args):
+    t = args.type
+    given = [f for f in ALL_FLAGS if getattr(args, f) not in (None, False, [])]
+    stray = [f for f in given if f not in TYPE_FLAGS[t]]
+    if stray:
+        raise NbError("a %s does not take %s" % (t, ", ".join("--" + f.rstrip("_").replace("_", "-") for f in stray)))
+
+    def apply(g):
+        nid = g.new_id(t)
+        who = author()
+        n = {k: default(kind) for k, kind in fields_of(t).items()}
+        n.update(id=nid, type=t, title=args.title.strip(), author=who, created=today(), updated=today(),
+                 body=read_body(args.body or ""), refs=args.ref or [], tags=args.tag or [])
+        if t == "audit":
+            n["status"] = ""
+        elif t in ESTABLISHED:
+            n["status"] = "pending"
+        else:
+            n["status"] = STATUSES[t][0]
+        for f in ("prediction", "spec", "execution", "rationale", "scope", "alternatives",
+                  "confidence", "verdict", "findings", "auditor", "revisit_if"):
+            if getattr(args, f, None):
+                n[f] = read_body(getattr(args, f)) if f in ("spec", "rationale") else getattr(args, f)
+        if args.retro:
+            n["retrospective"] = True
+        if args.reject:
+            n["rejected"] = args.reject
+        g.nodes[nid] = n
+        for spec in args.link or []:
+            rel, to = parse_link(g, spec)
+            if rel in ("produces", "tests"):
+                raise NbError("%s links are made by `nb %s`" % (rel, "result" if rel == "produces" else "predict"))
+            g.add_link(nid, rel, to)
+        for r in args.from_ or []:
+            g.add_link(nid, "derived-from" if t == "conclusion" else "suggested-by", g.resolve(r))
+        if args.of:
+            g.add_link(nid, "audits", g.resolve(args.of, {"conclusion"}))
+            n["audited_at"] = g.head or ""
+            n["auditor"] = n["auditor"] or who
+        if t == "conclusion":
+            check_conclusion_basis(g, nid)
+        g.touch(n, "add", to=n["status"] or None)
+        if t == "hypothesis" or (t in ESTABLISHED and who == "user"):
+            g.establish(nid, "add")
+        return nid
+
+    nid = write(lambda nid: "nb: add %s" % nid, apply)
+    print(nid)
+
+
+def cmd_predict(args):
+    def apply(g):
+        e = g.resolve(args.experiment, {"experiment"})
+        h = g.resolve(args.hypothesis, {"hypothesis"})
+        n = g.nodes[e]
+        if n["status"] != "draft":
+            raise NbError("%s is %s; predictions can only be added to a draft" % (e, n["status"]))
+        if any(p["hypothesis"] == h for p in n["predictions"]):
+            raise NbError("%s already has a prediction for %s" % (e, h))
+        n["predictions"].append({"hypothesis": h, "prediction": args.prediction,
+                                 "metric": args.metric, "decision_rule": args.rule})
+        g.add_link(e, "tests", h)
+        g.touch(n, "predict", to=h)
+        return e, h
+
+    e, h = write(lambda r: "nb: predict %s %s" % r, apply)
+    print("%s tests %s" % (e, h))
+
+
+def check_link_allowed(g, nid, rel):
+    n = g.nodes[nid]
+    t = n["type"]
+    if t == "audit":
+        raise NbError("audits are immutable")
+    if rel == "produces":
+        raise NbError("produces links are made by `nb result`")
+    if rel == "tests":
+        raise NbError("tests links are made by `nb predict`")
+    if t == "result" and rel not in ("supports", "contradicts"):
+        raise NbError("a result can only gain supports or contradicts links")
+    if rel in ("derived-from", "supersedes") and n["status"] != "pending":
+        raise NbError("%s links are the basis of %s and cannot change once it is %s"
+                      % (rel, nid, n["status"]))
+
+
+def cmd_link(args):
+    def apply(g):
+        a, b = g.resolve(args.source), g.resolve(args.target)
+        check_link_allowed(g, a, args.rel)
+        if args.rel not in EDGES:
+            raise NbError("unknown relation %r" % args.rel)
+        g.add_link(a, args.rel, b)
+        g.touch(g.nodes[a], "link", to="%s %s" % (args.rel, b))
+        return a, args.rel, b
+
+    print("%s %s %s" % write(lambda r: "nb: link %s %s %s" % r, apply))
+
+
+def cmd_unlink(args):
+    def apply(g):
+        a, b = g.resolve(args.source), g.resolve(args.target)
+        n = g.nodes[a]
+        if n["type"] in ("result", "audit") or n.get("status") not in INITIAL:
+            raise NbError("%s is %s; links can only be removed while a node is draft, open or pending"
+                          % (a, n.get("status") or n["type"]))
+        if args.rel == "produces":
+            raise NbError("produces links cannot be removed")
+        before = len(n["links"])
+        n["links"] = [l for l in n["links"] if not (l["rel"] == args.rel and l["to"] == b)]
+        if len(n["links"]) == before:
+            raise NbError("%s has no %s link to %s" % (a, args.rel, b))
+        if args.rel == "tests":
+            n["predictions"] = [p for p in n["predictions"] if p["hypothesis"] != b]
+        g.touch(n, "unlink", to="%s %s" % (args.rel, b))
+        return a, args.rel, b
+
+    print("removed %s %s %s" % write(lambda r: "nb: unlink %s %s %s" % r, apply))
+
+
+def cmd_set(args):
+    def apply(g):
+        nid = g.resolve(args.id)
+        n = g.nodes[nid]
+        t, f = n["type"], args.field
+        fields = fields_of(t)
+        if f not in fields or f in SYSTEM_FIELDS:
+            raise NbError("%s is not a field `nb set` can change on a %s" % (f, t))
+        if f != "tags":
+            if t in ("audit", "result"):
+                raise NbError("a %s cannot change, except its tags" % t)
+            if f not in ("body", "refs"):
+                if n["status"] not in INITIAL:
+                    raise NbError("%s is %s; only body, refs and tags can change now" % (nid, n["status"]))
+                if t == "hypothesis" and any(g.status(e) != "draft" for e in g.into(nid, "tests")):
+                    raise NbError("%s is tested by a frozen experiment; supersede it instead" % nid)
+        kind = fields[f]
+        value = read_body(args.value)
+        if kind is list:
+            cur = list(n[f])
+            if args.remove:
+                if value not in cur:
+                    raise NbError("%s has no %s %r" % (nid, f, value))
+                cur.remove(value)
+            elif args.append:
+                cur.append(value)
+            else:
+                cur = [value]
+            n[f] = cur
+        elif args.append or args.remove:
+            raise NbError("--append and --remove are for list fields")
+        else:
+            n[f] = value
+        g.touch(n, "set", field=f)
+        return nid, f
+
+    print("set %s %s" % write(lambda r: "nb: set %s %s" % r, apply))
+
+
+def reason_required(t, cur, new):
+    return (new in ("abandoned", "parked", "dropped", "rejected")
+            or (t == "conclusion" and new == "refuted")
+            or (t == "question" and new == "open")
+            or (t == "hypothesis" and cur in ("supported", "refuted")))
+
+
+def cmd_status(args):
+    def apply(g):
+        nid = g.resolve(args.id)
+        n = g.nodes[nid]
+        t, cur, new = n["type"], n.get("status"), args.status
+        if new not in STATUSES.get(t, []):
+            raise NbError("a %s has no status %r" % (t, new))
+        if new not in STATUS_MOVES.get(t, {}).get(cur, set()):
+            hint = {"frozen": "nb freeze", "pending": "", "superseded": "add a node that supersedes it"}.get(new, "")
+            if cur == "pending":
+                hint = "nb confirm or nb reject"
+            elif t == "result":
+                hint = "nb invalidate"
+            raise NbError("%s cannot go from %s to %s with nb status%s"
+                          % (nid, cur, new, " (use %s)" % hint if hint else ""))
+        if reason_required(t, cur, new) and not args.reason:
+            raise NbError("moving %s to %s needs --reason" % (nid, new))
+        backers = lambda rel, ty, st: [c for c in g.into(nid, rel) if g.type(c) == ty and g.status(c) == st]
+        if t == "hypothesis" and not backers("supports" if new == "supported" else "contradicts", "conclusion", "supported"):
+            raise NbError("%s can be %s only when a supported conclusion %s it"
+                          % (nid, new, "supports" if new == "supported" else "contradicts"))
+        if t == "question" and new == "answered" and not backers("answers", "conclusion", "supported"):
+            raise NbError("%s can be answered only when a supported conclusion answers it" % nid)
+        if t == "question" and new == "settled" and not backers("affects", "decision", "active"):
+            raise NbError("%s can be settled only when an active decision affects it" % nid)
+        if t in ("experiment", "exploration") and new == "done" and not g.out(nid, "produces"):
+            raise NbError("%s has no results yet (nb result)" % nid)
+        if t == "lead" and new == "followed" and not g.out(nid, "raises", "spawns"):
+            raise NbError("%s is followed once it raises a question or spawns a hypothesis or experiment" % nid)
+        g.set_status(nid, new, "status", reason=args.reason)
+        return nid, new
+
+    print("%s %s" % write(lambda r: "nb: status %s %s" % r, apply))
+
+
+def cmd_freeze(args):
+    def apply(g):
+        nid = g.resolve(args.id, {"experiment", "exploration"})
+        n = g.nodes[nid]
+        if n["status"] != "draft":
+            raise NbError("%s is %s, not draft" % (nid, n["status"]))
+        missing = [f for f in ("spec", "execution") if not n[f]]
+        if n["type"] == "experiment" and not n["predictions"]:
+            missing.append("a prediction (nb predict)")
+        if n["type"] == "experiment" and any(not all(p.get(k) for k in PREDICTION_KEYS) for p in n["predictions"]):
+            missing.append("complete predictions")
+        if missing:
+            raise NbError("%s cannot be frozen without %s" % (nid, ", ".join(missing)))
+        if not g.has_active_goal(nid):
+            raise NbError("%s has no path to an active goal (nb path %s)" % (nid, nid))
+        n["spec_hash"] = spec_hash(n)
+        n["frozen_at"] = g.head or ""
+        g.set_status(nid, "frozen", "freeze")
+        return nid
+
+    print("frozen %s" % write(lambda nid: "nb: freeze %s" % nid, apply))
+
+
+def cmd_deviate(args):
+    def apply(g):
+        nid = g.resolve(args.id, {"experiment", "exploration"})
+        n = g.nodes[nid]
+        if n["status"] not in ("frozen", "done"):
+            raise NbError("%s is %s; deviations are recorded on frozen specs (edit a draft directly)" % (nid, n["status"]))
+        n["deviations"].append({"date": today(), "author": author(), "text": read_body(args.text)})
+        g.touch(n, "deviate")
+        return nid
+
+    print("deviation recorded on %s" % write(lambda nid: "nb: deviate %s" % nid, apply))
+
+
+def provenance(git, root, args):
+    p = {}
+    commit = args.commit or (git.rev("HEAD") if git.ok("rev-parse", "--verify", "-q", "HEAD") else None)
+    if commit:
+        p["commit"] = git.rev(commit) or commit  # keep as given when it does not resolve here
+    if not args.commit and commit:
+        p["dirty"] = bool(git.run("status", "--porcelain", "--untracked-files=no").stdout.strip())
+    cwd = os.path.relpath(os.getcwd(), root)
+    if cwd != ".":
+        p["cwd"] = cwd
+    if args.run_dir:
+        p["run_dir"] = args.run_dir
+    if args.ext_id:
+        p["external_ids"] = args.ext_id
+    if args.artifact:
+        p["artifacts"] = list(args.artifact)
+    return p
+
+
+def cmd_result(args):
+    root = repo_root()
+    git = Git(root)
+    metrics = None
+    if args.metrics:
+        try:
+            metrics = json.loads(Path(args.metrics).read_text())
+        except (OSError, ValueError) as e:
+            raise NbError("cannot read metrics from %s: %s" % (args.metrics, e))
+        if not isinstance(metrics, dict):
+            raise NbError("--metrics must hold a JSON object")
+    prov = provenance(git, root, args)
+    if args.metrics:
+        rel = os.path.relpath(os.path.abspath(args.metrics), root)
+        prov.setdefault("artifacts", [])
+        if rel not in prov["artifacts"]:
+            prov["artifacts"].append(rel)
+
+    def apply(g):
+        e = g.resolve(args.experiment, {"experiment", "exploration"})
+        if g.status(e) != "frozen":
+            raise NbError("%s is %s; results attach only to a frozen experiment or exploration" % (e, g.status(e)))
+        rid = g.new_id("result")
+        n = {k: default(kind) for k, kind in fields_of("result").items()}
+        n.update(id=rid, type="result", title=short(args.summary, 100), summary=args.summary,
+                 author=author(), created=today(), updated=today(), status="valid",
+                 provenance=prov, metrics=metrics or {}, tags=args.tag or [])
+        g.nodes[rid] = n
+        for spec in args.link or []:
+            rel, to = parse_link(g, spec)
+            if rel not in ("supports", "contradicts"):
+                raise NbError("a result can only have supports or contradicts links")
+            g.add_link(rid, rel, to)
+        g.touch(n, "add", to="valid")
+        g.add_link(e, "produces", rid)
+        g.touch(g.nodes[e], "result", to=rid)
+        return rid
+
+    print(write(lambda rid: "nb: result %s" % rid, apply))
+
+
+def cmd_confirm(args):
+    def apply(g):
+        nid = g.resolve(args.id)
+        n = g.nodes[nid]
+        if n.get("status") != "pending":
+            raise NbError("%s is %s, not pending" % (nid, n.get("status") or n["type"]))
+        g.establish(nid, "confirm")
+        return nid, n["status"]
+
+    print("confirmed %s (%s)" % write(lambda r: "nb: confirm %s" % r[0], apply))
+
+
+def cmd_reject(args):
+    def apply(g):
+        nid = g.resolve(args.id)
+        n = g.nodes[nid]
+        if n.get("status") != "pending":
+            raise NbError("%s is %s, not pending" % (nid, n.get("status") or n["type"]))
+        g.set_status(nid, REJECTED[n["type"]], "reject", reason=args.reason)
+        return nid
+
+    print("rejected %s" % write(lambda nid: "nb: reject %s" % nid, apply))
+
+
+def cmd_invalidate(args):
+    def apply(g):
+        nid = g.resolve(args.id, {"result"})
+        if g.status(nid) != "valid":
+            raise NbError("%s is already %s" % (nid, g.status(nid)))
+        g.set_status(nid, "invalidated", "invalidate", reason=args.reason)
+        return nid
+
+    print("invalidated %s" % write(lambda nid: "nb: invalidate %s" % nid, apply))
+
+
+def cmd_config(args):
+    if args.action == "get":
+        g = read()
+        conf = {k: g.config(k) for k in CONFIG_DEFAULTS}
+        if args.key:
+            if args.key not in conf:
+                raise NbError("unknown config key %r" % args.key)
+            conf = {args.key: conf[args.key]}
+        emit(conf, args.json, ["%s = %s" % (k, json.dumps(v)) for k, v in conf.items()])
+        return
+    if args.key not in CONFIG_DEFAULTS or args.value is None:
+        raise NbError("usage: nb config set <key> <value>; keys: %s" % ", ".join(CONFIG_DEFAULTS))
+    try:
+        value = json.loads(args.value)
+    except ValueError:
+        value = args.value
+    want = type(CONFIG_DEFAULTS[args.key])
+    if not isinstance(value, want) or isinstance(value, bool):
+        raise NbError("%s takes a %s" % (args.key, want.__name__))
+
+    def apply(g):
+        g.meta["config"][args.key] = value
+
+    write("nb: config %s" % args.key, apply)
+    print("%s = %s" % (args.key, json.dumps(value)))
+
+
+# ----------------------------------------------------------- read cmds ---
+
+def cmd_show(args):
+    g = read()
+    nid = g.resolve(args.id)
+    n = g.nodes[nid]
+    inbound = [{"rel": r, "from": f} for r, f in sorted(g.inbound.get(nid, []))]
+    if args.json:
+        emit(dict(json.loads(serialise(n)), inbound=inbound, retro=g.retro(nid)), True, [])
+        return
+    head = "%s  %s  %s%s" % (nid, n["type"], n.get("status") or n.get("verdict"), "  [retro]" if g.retro(nid) else "")
+    lines = [head, n["title"], "by %s, created %s, updated %s" % (n["author"], n["created"], n["updated"])]
+    for k in fields_of(n["type"]):
+        if k in ("id", "type", "title", "author", "created", "updated", "status", "links", "log") or not n.get(k):
+            continue
+        v = n[k]
+        if k == "predictions":
+            lines.append("predictions:")
+            for p in v:
+                lines.append("  %s: %s | metric: %s | rule: %s" % (p["hypothesis"], p["prediction"], p["metric"], p["decision_rule"]))
+        elif isinstance(v, str) and "\n" in v:
+            lines.append("%s:" % k)
+            lines.extend("  " + x for x in v.split("\n"))
+        elif isinstance(v, list) and v and isinstance(v[0], dict):
+            lines.append("%s:" % k)
+            lines.extend("  " + canonical(x) for x in v)
+        elif isinstance(v, (list, dict)):
+            lines.append("%s: %s" % (k, canonical(v)))
+        else:
+            lines.append("%s: %s" % (k, v))
+    if n["links"]:
+        lines.append("links:")
+        lines.extend("  %-12s -> %s" % (l["rel"], row(g, l["to"], 60) if l["to"] in g.nodes else l["to"] + " (missing)") for l in n["links"])
+    if inbound:
+        lines.append("incoming:")
+        lines.extend("  %-12s <- %s" % (i["rel"], row(g, i["from"], 60)) for i in inbound)
+    lines.append("log:")
+    for entry in n["log"]:
+        detail = " ".join(x for x in [entry.get("field", ""), entry.get("from", "") and "%s ->" % entry["from"],
+                                       entry.get("to", "")] if x)
+        lines.append("  %s %-6s %-10s %s%s" % (entry["date"], entry["author"], entry["event"], detail,
+                                              "  (%s)" % entry["reason"] if entry.get("reason") else ""))
+    emit(None, False, lines)
+
+
+def cmd_context(args):
+    g = read()
+    root = g.resolve(args.id)
+    seen, frontier, items = {root}, [root], []
+    for depth in range(1, args.depth + 1):
+        nxt = []
+        for x in frontier:
+            nbrs = [(l["rel"], "->", l["to"]) for l in g.nodes[x]["links"]] + \
+                   [(r, "<-", f) for r, f in sorted(g.inbound.get(x, []))]
+            for rel, arrow, y in nbrs:
+                if y in g.nodes and y not in seen:
+                    seen.add(y)
+                    nxt.append(y)
+                    items.append({"depth": depth, "via": x, "rel": rel, "dir": arrow, "node": brief(g, y)})
+        frontier = nxt
+    if args.json:
+        emit({"node": brief(g, root), "neighbours": items}, True, [])
+        return
+    lines = [row(g, root)]
+    for it in items:
+        lines.append("%s%s %-12s %s" % ("  " * it["depth"], it["dir"], it["rel"], row(g, it["node"]["id"], 70)))
+    emit(None, False, lines)
+
+
+def cmd_path(args):
+    g = read()
+    nid = g.resolve(args.id)
+    paths = g.paths(nid, extra=True)
+    leads = g.lineage_leads(nid)
+    drift = g.drift(nid) - (1 if g.type(nid) == "lead" else 0)
+    if args.json:
+        emit({"id": nid, "paths": paths, "goal_status": {p[-1]: g.status(p[-1]) for p in paths},
+              "lineage_leads": leads, "drift": drift}, True, [])
+        return
+    lines = []
+    if not paths:
+        lines.append("%s has no path to a goal" % nid)
+    for p in paths:
+        lines.append(" -> ".join(p) + "  (%s)" % g.status(p[-1]))
+    if leads:
+        lines.append("lineage passes through %d lead%s (drift %d): %s"
+                     % (len(leads), "" if len(leads) == 1 else "s", drift, ", ".join(leads)))
+    emit(None, False, lines)
+
+
+def cmd_pending(args):
+    g = read()
+    ids = sorted((k for k, n in g.nodes.items() if n.get("status") == "pending"),
+                 key=lambda k: (g.nodes[k]["created"], k), reverse=True)
+    emit([brief(g, k) for k in ids], args.json,
+         ["%s  %s, %s" % (row(g, k), g.nodes[k]["author"], g.nodes[k]["created"]) for k in ids] or ["nothing pending"])
+
+
+def node_text(n):
+    parts = [n.get(k, "") for k in ("title", "body", "summary", "rationale", "scope", "alternatives",
+                                     "prediction", "spec", "findings", "revisit_if")]
+    parts += n.get("rejected", []) + n.get("tags", []) + n.get("refs", [])
+    return "\n".join(p for p in parts if p).lower()
+
+
+def cmd_query(args):
+    g = read()
+    ids = []
+    for k, n in g.nodes.items():
+        if args.type and n["type"] != args.type:
+            continue
+        if args.status and n.get("status") != args.status:
+            continue
+        if args.author and n["author"] != args.author:
+            continue
+        if args.tag and not set(args.tag) <= set(n["tags"]):
+            continue
+        if args.since and n["updated"] < args.since:
+            continue
+        if args.text and args.text.lower() not in node_text(n):
+            continue
+        ids.append(k)
+    ids.sort(key=lambda k: (g.nodes[k]["created"], k), reverse=True)
+    total = len(ids)
+    if not args.all:
+        ids = ids[:LIST_LIMIT]
+    lines = [row(g, k) for k in ids]
+    if total > len(ids):
+        lines.append("(+%d more; --all)" % (total - len(ids)))
+    emit([brief(g, k) for k in ids], args.json, lines or ["no matches"])
+
+
+def cmd_log(args):
+    root = repo_root()
+    git = Git(root)
+    if not git.rev(ref_name()):
+        raise NbError("no notebook in this repository; run `nb init`")
+    out = git.run("log", "--date=short", "--format=%h%x09%ad%x09%s", "-n", str(args.n), ref_name()).stdout
+    rows = [dict(zip(("commit", "date", "message"), l.split("\t"))) for l in out.splitlines()]
+    emit(rows, args.json, ["%s %s %s" % (r["commit"], r["date"], r["message"]) for r in rows])
+
+
+# ----------------------------------------------------------------- lint ---
+
+def lint(g, full=True):
+    """[(level, id, message)]. full=False skips checks that touch git history or the filesystem."""
+    out = [("error", i, m) for i, m in validate(g)]
+    add = lambda lvl, i, m: out.append((lvl, i, m))
+    memo = {}
+    old_trees = {}
+    for nid in sorted(g.nodes):
+        n = g.nodes[nid]
+        t, st = n["type"], n.get("status")
+        if t in ("experiment", "exploration") and st in ("draft", "frozen"):
+            if not g.has_active_goal(nid):
+                add("error", nid, "%s %s has no path to an active goal" % (st, t))
+            d = g.drift(nid, memo)
+            if d >= g.config("drift_leads"):
+                add("warn", nid, "drift: its lineage passes through %d leads (%s)" % (d, ", ".join(g.lineage_leads(nid))))
+        if t == "conclusion" and st == "supported":
+            bad = [r for r in g.out(nid, "derived-from") if g.status(r) == "invalidated"]
+            if bad:
+                add("error", nid, "supported conclusion derives from invalidated %s" % ", ".join(bad))
+            if len(g.out(nid, "derived-from")) < g.config("min_results_supported"):
+                add("warn", nid, "supported by fewer than %d results" % g.config("min_results_supported"))
+            for a in g.into(nid, "audits"):
+                if g.nodes[a].get("verdict") in ("concerns", "unsound"):
+                    add("warn", nid, "audit %s says %s" % (a, g.nodes[a]["verdict"]))
+            contra = g.into(nid, "contradicts")
+            if contra and full:
+                sha = n.get("confirmed_at")
+                if sha not in old_trees:
+                    try:
+                        old_trees[sha] = Graph.load(g.git, sha) if sha else None
+                    except NbError:
+                        old_trees[sha] = None
+                old = old_trees[sha]
+                for c in contra:
+                    then = old.nodes.get(c) if old else None
+                    if not then or not any(l["rel"] == "contradicts" and l["to"] == nid for l in then["links"]):
+                        add("warn", nid, "contradicted by %s, added after it was confirmed" % c)
+        backers = lambda rel, ty, s: [c for c in g.into(nid, rel) if g.type(c) == ty and g.status(c) == s]
+        if t == "hypothesis" and st in ("supported", "refuted"):
+            if not backers("supports" if st == "supported" else "contradicts", "conclusion", "supported"):
+                add("warn", nid, "%s, but no supported conclusion %s it any more"
+                    % (st, "supports" if st == "supported" else "contradicts"))
+        if t == "question" and st == "answered" and not backers("answers", "conclusion", "supported"):
+            add("warn", nid, "answered, but no supported conclusion answers it any more")
+        if t == "question" and st == "settled" and not backers("affects", "decision", "active"):
+            add("warn", nid, "settled, but no active decision affects it any more")
+        if t == "question" and st == "open" and not g.has_active_goal(nid):
+            add("warn", nid, "open question with no path to an active goal (re-link, park or abandon it)")
+        if st == "pending":
+            try:
+                age = (datetime.date.fromisoformat(today()) - datetime.date.fromisoformat(n["created"])).days
+            except ValueError:
+                age = 0
+            if age > g.config("pending_days"):
+                add("warn", nid, "pending for %d days (nb confirm or nb reject)" % age)
+    if full:
+        lint_provenance(g, add)
+    order = {"error": 0, "warn": 1}
+    return sorted(out, key=lambda x: (order[x[0]], x[1]))
+
+
+def lint_provenance(g, add):
+    results = {k: n for k, n in g.nodes.items() if n["type"] == "result"}
+    commits = {k: n["provenance"].get("commit") for k, n in results.items() if n["provenance"].get("commit")}
+    if commits:
+        res = g.git.run("rev-list", "--all", check=False)
+        reachable = sorted(res.stdout.split())
+        for k, c in sorted(commits.items()):
+            i = bisect.bisect_left(reachable, c)
+            if not (i < len(reachable) and reachable[i].startswith(c)):
+                add("warn", k, "provenance commit %s is not reachable from any ref" % c[:12])
+    backing = set()
+    for k, n in g.nodes.items():
+        if n["type"] == "conclusion" and n.get("status") == "supported":
+            backing.update(g.out(k, "derived-from"))
+    for k in sorted(backing):
+        if k in results:
+            for a in results[k]["provenance"].get("artifacts", []):
+                if "://" not in a and not (g.git.root / a).exists():
+                    add("warn", k, "artifact %s no longer exists" % a)
+
+
+def cmd_lint(args):
+    g = read()
+    out = lint(g)
+    emit([{"level": l, "id": i, "message": m} for l, i, m in out], args.json,
+         ["%-5s  %s: %s" % (l, i, m) for l, i, m in out] or ["ok"])
+    if any(l == "error" for l, _, _ in out):
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------- prime ---
+
+PRIME_HEAD = [
+    "# lab-notebook",
+    "This repo's research record (nb): goals, questions, experiments, results, conclusions.",
+    "foam holds work and how-to facts; nb holds what the project found and why. "
+    "Use nb context/path/query for more; nb freeze and nb confirm are the user's to approve.",
+]
+
+
+def last_event_date(n, event):
+    for entry in reversed(n["log"]):
+        if entry["event"] == event:
+            return entry["date"]
+    return n["created"]
+
+
+def prime_text(g, max_chars):
+    limit = g.config("prime_section_limit")
+    nodes = g.nodes
+
+    def pick(pred, key):
+        ids = [k for k, n in nodes.items() if pred(k, n)]
+        return sorted(ids, key=key, reverse=True)
+
+    def line(k, extra="", width=80):
+        n = nodes[k]
+        marks = " [retro]" if g.retro(k) else ""
+        return "%-10s %s%s%s" % (k, short(n["title"], width), marks, ("   " + extra) if extra else "")
+
+    sections = []
+    ids = pick(lambda k, n: n["type"] == "goal" and n["status"] == "active", lambda k: nodes[k]["created"])
+    sections.append(("Goals", ids, lambda k: line(k), "nb query --type goal --status active"))
+    ids = pick(lambda k, n: n.get("status") == "pending", lambda k: (nodes[k]["created"], k))
+    sections.append(("Awaiting the user (pending, not established)", ids,
+                     lambda k: line(k, "%s, %s, %s" % (nodes[k]["type"], nodes[k]["author"], nodes[k]["created"]), 70),
+                     "nb pending"))
+    ids = pick(lambda k, n: n["type"] in ("experiment", "exploration") and n["status"] == "frozen",
+               lambda k: last_event_date(nodes[k], "freeze"))
+
+    def inflight(k):
+        n = nodes[k]
+        return line(k, "%s frozen %s, %d results, %d runs" % (n["type"], last_event_date(n, "freeze"),
+                                                               len(g.out(k, "produces")), len(n["runs"])), 60)
+    sections.append(("In flight (frozen)", ids, inflight, "nb query --status frozen"))
+    ids = pick(lambda k, n: n["type"] == "question" and n["status"] == "open" and g.has_active_goal(k),
+               lambda k: (nodes[k]["updated"], k))
+    sections.append(("Open questions", ids, lambda k: line(k), "nb query --type question --status open"))
+    ids = pick(lambda k, n: n["type"] == "conclusion" and n["status"] == "supported",
+               lambda k: (last_event_date(nodes[k], "confirm"), k))
+    sections.append(("Recent conclusions", ids,
+                     lambda k: line(k, ("confidence " + nodes[k]["confidence"]) if nodes[k].get("confidence") else ""),
+                     "nb query --type conclusion --status supported"))
+    ids = pick(lambda k, n: n["type"] == "lead" and n["status"] == "active", lambda k: (nodes[k]["updated"], k))
+    sections.append(("Active leads", ids, lambda k: line(k), "nb query --type lead --status active"))
+
+    rendered = []
+    for title, ids, fmt, query in sections:
+        if not ids:
+            continue
+        body = [fmt(k) for k in ids[:limit]]
+        if len(ids) > limit:
+            body.append("(+%d more: %s)" % (len(ids) - limit, query))
+        rendered.append({"full": ["## " + title] + body, "short": ["## %s: %d (%s)" % (title, len(ids), query)]})
+    issues = lint(g, full=False)
+    errors = sum(1 for l, _, _ in issues if l == "error")
+    if issues:
+        msg = "## Lint: %d error%s, %d warning%s (nb lint)" % (
+            errors, "" if errors == 1 else "s", len(issues) - errors, "" if len(issues) - errors == 1 else "s")
+        rendered.append({"full": [msg], "short": [msg]})
+    if not rendered:
+        rendered.append({"full": ["(empty notebook: add a goal with nb add goal)"], "short": []})
+
+    use = ["full"] * len(rendered)
+
+    def text():
+        out = list(PRIME_HEAD)
+        for r, u in zip(rendered, use):
+            out.extend(r[u])
+        return "\n".join(out)
+
+    i = len(rendered) - 1
+    while len(text()) > max_chars and i >= 0:
+        use[i] = "short"
+        i -= 1
+    t = text()
+    return t if len(t) <= max_chars else t[:max_chars - 1] + "…"
+
+
+def cmd_prime(args):
+    try:
+        git = Git(repo_root())
+        if not git.rev(ref_name()):
+            return
+        g = Graph.load(git)
+    except NbError:
+        return
+    text = prime_text(g, args.max_chars or g.config("prime_max_chars"))
+    if args.hook_json:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
+    else:
+        print(text)
+
+
+# ----------------------------------------------------------------- sync ---
+
+def merge_nodes(base, ours, theirs):
+    """Three-way merge of node dicts. Returns (merged, conflicts)."""
+    merged, conflicts = {}, []
+    for nid in sorted(set(base) | set(ours) | set(theirs)):
+        b, o, t = base.get(nid), ours.get(nid), theirs.get(nid)
+        if o == t:
+            res = o
+        elif o == b:
+            res = t
+        elif t == b:
+            res = o
+        elif b is None or o is None or t is None:
+            conflicts.append("%s: added or removed differently on both sides" % nid)
+            res = o
+        else:
+            res = {}
+            for k in sorted(set(b) | set(o) | set(t)):
+                bk, ok, tk = b.get(k), o.get(k), t.get(k)
+                if ok == tk:
+                    v = ok
+                elif ok == bk:
+                    v = tk
+                elif tk == bk:
+                    v = ok
+                elif k in APPEND_LISTS and all(isinstance(x, list) for x in (bk or [], ok or [], tk or [])):
+                    v, seen = [], set()
+                    for x in (bk or []) + (ok or []) + (tk or []):
+                        if canonical(x) not in seen:
+                            seen.add(canonical(x))
+                            v.append(x)
+                elif k == "updated":
+                    v = max(ok or "", tk or "")
+                else:
+                    conflicts.append("%s: %s changed on both sides (%r vs %r)" % (nid, k, ok, tk))
+                    v = ok
+                if v is not None:
+                    res[k] = v
+        if res is not None:
+            merged[nid] = res
+    return merged, conflicts
+
+
+def cmd_sync(args):
+    root = repo_root()
+    git = Git(root)
+    say = (lambda *a: None) if args.quiet else print
+    ref = ref_name()
+    if not git.ok("remote", "get-url", "origin"):
+        raise NbError("no origin remote to sync with")
+    for attempt in range(3):
+        fetch = git.run("fetch", "-q", "origin", "+%s:%s" % (ref, ORIGIN_REF), check=False)
+        remote = git.rev(ORIGIN_REF) if fetch.returncode == 0 else None
+        if fetch.returncode != 0 and "couldn't find remote ref" not in fetch.stderr.lower():
+            raise NbError("fetch failed: %s" % fetch.stderr.strip())
+        local = git.rev(ref)
+        if not local and not remote:
+            raise NbError("no notebook locally or on origin; run `nb init`")
+        if not local:
+            git.swap(ref, remote, None)
+            say("fetched the notebook from origin")
+            return
+        if remote == local:
+            say("notebook up to date")
+            return
+        if remote and git.ok("merge-base", "--is-ancestor", local, remote):
+            if not git.swap(ref, remote, local):
+                continue
+            say("fast-forwarded the notebook to origin")
+            return
+        if remote and not git.ok("merge-base", "--is-ancestor", remote, local):
+            base_sha = git.run("merge-base", local, remote, check=False).stdout.strip() or None
+            base = Graph.load(git, base_sha) if base_sha else Graph(git, None, {"config": {}}, {}, {})
+            g_ours, g_theirs = Graph.load(git, local), Graph.load(git, remote)
+            strip = lambda gr: {k: json.loads(serialise(n)) for k, n in gr.nodes.items()}
+            nodes, conflicts = merge_nodes(strip(base), strip(g_ours), strip(g_theirs))
+            conf, cconf = merge_nodes({"c": base.meta.get("config", {})}, {"c": g_ours.meta["config"]},
+                                      {"c": g_theirs.meta["config"]})
+            conflicts += [c.replace("c: ", "config: ", 1) for c in cconf]
+            if conflicts:
+                raise NbError("sync stopped, nothing written; resolve these with nb on one side and sync again:\n  "
+                              + "\n  ".join(conflicts))
+            merged = Graph(git, local, {"schema": SCHEMA, "config": conf.get("c", {})}, nodes, g_ours.blobs)
+            for n in merged.nodes.values():
+                for k, kind in fields_of(n.get("type")).items():
+                    n.setdefault(k, default(kind))
+            before = set(validate(g_ours)) | set(validate(g_theirs))
+            new = [e for e in validate(merged) if e not in before]
+            if new:
+                raise NbError("sync stopped, the merged notebook would be invalid:\n  "
+                              + "\n  ".join("%s: %s" % e for e in new))
+            commit = git.commit_tree(build_tree(merged), [local, remote], "nb: sync merge")
+            if not git.swap(ref, commit, local):
+                continue
+            say("merged origin's notebook changes")
+        push = git.run("push", "-q", "--no-verify", "origin", "%s:%s" % (ref, ref), check=False)
+        if push.returncode == 0:
+            git.run("update-ref", ORIGIN_REF, git.rev(ref), check=False)
+            say("pushed the notebook to origin")
+            return
+        if "rejected" not in push.stderr and "fetch first" not in push.stderr:
+            raise NbError("push failed: %s" % push.stderr.strip())
+    raise NbError("origin kept changing during sync; try again")
+
+
+# --------------------------------------------------------------- parser ---
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="nb", description="The project's research record: a typed graph on a git ref.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def add(name, fn, help):
+        sp = sub.add_parser(name, help=help, description=help)
+        sp.set_defaults(fn=fn, json=False)
+        return sp
+
+    def json_flag(sp):
+        sp.add_argument("--json", action="store_true", help="machine-readable output")
+
+    add("init", cmd_init, "create the notebook ref and set up sync with origin (safe to re-run)")
+
+    sp = add("add", cmd_add, "create a node and print its id")
+    sp.add_argument("type", choices=sorted(TYPE_FIELDS))
+    sp.add_argument("title")
+    sp.add_argument("--body", help="markdown; '-' reads stdin")
+    sp.add_argument("--ref", action="append", help="opaque reference (foam id, URL, path); repeat per value")
+    sp.add_argument("--tag", action="append", help="filtering label; repeat per value")
+    sp.add_argument("--link", action="append", metavar="REL:ID", help="outgoing edge; repeat per value")
+    sp.add_argument("--prediction", help="hypothesis: what should be observed if it holds")
+    sp.add_argument("--spec", help="experiment/exploration: what will be done ('-' reads stdin)")
+    sp.add_argument("--exec", dest="execution", choices=sorted(ENUMS["execution"]))
+    sp.add_argument("--retro", action="store_true", help="experiment: spec and predictions written after the results")
+    sp.add_argument("--rationale", help="conclusion/lead/decision: why ('-' reads stdin)")
+    sp.add_argument("--scope", help="conclusion: where the claim holds")
+    sp.add_argument("--alternatives", help="conclusion: alternatives ruled out")
+    sp.add_argument("--confidence", choices=sorted(ENUMS["confidence"]))
+    sp.add_argument("--from", dest="from_", action="append", metavar="RES",
+                    help="conclusion: derived-from result; lead: suggested-by result; repeat per value")
+    sp.add_argument("--reject", action="append", metavar="ALT", help="decision: alternative not taken; repeat per value")
+    sp.add_argument("--revisit-if", dest="revisit_if")
+    sp.add_argument("--of", metavar="CON", help="audit: the audited conclusion")
+    sp.add_argument("--verdict", choices=sorted(ENUMS["verdict"]))
+    sp.add_argument("--findings")
+    sp.add_argument("--auditor")
+
+    sp = add("predict", cmd_predict, "add a prediction (and tests link) to a draft experiment")
+    sp.add_argument("experiment")
+    sp.add_argument("hypothesis")
+    sp.add_argument("--prediction", required=True)
+    sp.add_argument("--metric", required=True)
+    sp.add_argument("--rule", required=True, help="decision rule: what outcome supports or refutes")
+
+    for name, fn, help in [("link", cmd_link, "add an edge"), ("unlink", cmd_unlink, "remove an edge (initial status only)")]:
+        sp = add(name, fn, help)
+        sp.add_argument("source")
+        sp.add_argument("rel", choices=sorted(EDGES))
+        sp.add_argument("target")
+
+    sp = add("set", cmd_set, "change a mutable field")
+    sp.add_argument("id")
+    sp.add_argument("field")
+    sp.add_argument("value", help="'-' reads stdin")
+    g = sp.add_mutually_exclusive_group()
+    g.add_argument("--append", action="store_true", help="add to a list field")
+    g.add_argument("--remove", action="store_true", help="remove from a list field")
+
+    sp = add("status", cmd_status, "change a node's status")
+    sp.add_argument("id")
+    sp.add_argument("status")
+    sp.add_argument("--reason")
+
+    sp = add("freeze", cmd_freeze, "freeze an experiment or exploration spec (the user's approval)")
+    sp.add_argument("id")
+
+    sp = add("deviate", cmd_deviate, "record a deviation from a frozen spec")
+    sp.add_argument("id")
+    sp.add_argument("text", help="'-' reads stdin")
+
+    sp = add("result", cmd_result, "record a result of a frozen experiment or exploration")
+    sp.add_argument("experiment")
+    sp.add_argument("summary", help="facts only")
+    sp.add_argument("--run-dir")
+    sp.add_argument("--artifact", action="append", help="path or URL; repeat per value")
+    sp.add_argument("--ext-id", action="append", help="W&B/MLflow/job id; repeat per value")
+    sp.add_argument("--metrics", metavar="FILE", help="JSON object written by the run")
+    sp.add_argument("--commit", help="code commit, if not HEAD")
+    sp.add_argument("--tag", action="append")
+    sp.add_argument("--link", action="append", metavar="REL:ID", help="supports or contradicts; repeat per value")
+
+    sp = add("confirm", cmd_confirm, "establish a pending node (the user's approval)")
+    sp.add_argument("id")
+
+    sp = add("reject", cmd_reject, "reject a pending node")
+    sp.add_argument("id")
+    sp.add_argument("--reason", required=True)
+
+    sp = add("invalidate", cmd_invalidate, "withdraw a result")
+    sp.add_argument("id")
+    sp.add_argument("--reason", required=True)
+
+    sp = add("config", cmd_config, "read or change notebook config")
+    sp.add_argument("action", choices=["get", "set"])
+    sp.add_argument("key", nargs="?")
+    sp.add_argument("value", nargs="?")
+    json_flag(sp)
+
+    sp = add("show", cmd_show, "one node with its edges and history")
+    sp.add_argument("id")
+    json_flag(sp)
+
+    sp = add("prime", cmd_prime, "capped briefing for the start of a session")
+    sp.add_argument("--hook-json", action="store_true")
+    sp.add_argument("--max-chars", type=int)
+
+    sp = add("context", cmd_context, "a node and its neighbourhood")
+    sp.add_argument("id")
+    sp.add_argument("--depth", type=int, default=1)
+    json_flag(sp)
+
+    sp = add("path", cmd_path, "paths to goals and the lineage of leads")
+    sp.add_argument("id")
+    json_flag(sp)
+
+    sp = add("pending", cmd_pending, "nodes awaiting the user")
+    json_flag(sp)
+
+    sp = add("query", cmd_query, "find nodes (newest first, %d unless --all)" % LIST_LIMIT)
+    sp.add_argument("--type", choices=sorted(TYPE_FIELDS))
+    sp.add_argument("--status")
+    sp.add_argument("--author", choices=["user", "claude"])
+    sp.add_argument("--tag", action="append")
+    sp.add_argument("--since", metavar="DATE", help="updated on or after YYYY-MM-DD")
+    sp.add_argument("--text")
+    sp.add_argument("--all", action="store_true")
+    json_flag(sp)
+
+    sp = add("log", cmd_log, "recent notebook commits")
+    sp.add_argument("-n", type=int, default=20)
+    json_flag(sp)
+
+    sp = add("lint", cmd_lint, "check the whole notebook")
+    json_flag(sp)
+
+    sp = add("sync", cmd_sync, "exchange the notebook with origin")
+    sp.add_argument("--quiet", action="store_true")
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        args.fn(args)
+    except NbError as e:
+        if args.json:
+            print(json.dumps({"error": str(e)}), file=sys.stderr)
+        else:
+            print("nb: %s" % e, file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
