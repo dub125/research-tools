@@ -1632,6 +1632,56 @@ class TestFixture(unittest.TestCase):
         self.assertTrue(self.node("E_cmt2")["retro"])
 
 
+GATE = HERE.parent / "hooks" / "gate.py"
+
+
+class TestGate(NbCase):
+    """hooks/gate.py: asks before gated nb verbs and CLAUDECODE overrides, silent otherwise."""
+
+    def gate(self, command, tool="Bash"):
+        payload = json.dumps({"tool_name": tool, "cwd": str(self.repo), "tool_input": {"command": command}})
+        res = subprocess.run([sys.executable, "-I", str(GATE)], input=payload, env=self.env,
+                             capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        if not res.stdout.strip():
+            return None
+        out = json.loads(res.stdout)["hookSpecificOutput"]
+        self.assertEqual(out["hookEventName"], "PreToolUse")
+        self.assertEqual(out["permissionDecision"], "ask")
+        return out["permissionDecisionReason"]
+
+    def test_gated_verbs_ask(self):
+        for cmd in ["nb freeze exp-abcd", "nb confirm con-abcd", "nb invalidate res-abcd --reason r",
+                    "nb config set drift_leads 3", "cd sub && nb confirm con-abcd",
+                    "ls; nb freeze exp-abcd", "/opt/x/bin/nb freeze exp-abcd",
+                    "python3 plugins/lab-notebook/bin/nb confirm con-abcd", "echo y | nb freeze exp-abcd"]:
+            self.assertIsNotNone(self.gate(cmd), cmd)
+
+    def test_other_commands_pass(self):
+        for cmd in ["nb add goal x", "nb config get", "nb show exp-abcd", "nb status exp-abcd done",
+                    "git status", "jupyter nbconvert x.ipynb", "ls nbfreeze"]:
+            self.assertIsNone(self.gate(cmd), cmd)
+        self.assertIsNone(self.gate("nb freeze exp-abcd", tool="Edit"))
+
+    def test_claudecode_override_asks(self):
+        for cmd in ["env -u CLAUDECODE nb add goal x", "CLAUDECODE= nb add goal x", "unset CLAUDECODE; nb add goal x",
+                    "env -i PATH=/usr/bin nb add goal x"]:
+            self.assertIn("CLAUDECODE", self.gate(cmd) or "", cmd)
+
+    def test_reason_describes_the_node(self):
+        self.init()
+        g = self.add("goal", "G")
+        q = self.add("question", "Q", "--link", "refines:" + g)
+        h = self.add("hypothesis", "H", "--prediction", "p", "--link", "addresses:" + q)
+        e = self.add("experiment", "Steering baseline", "--spec", "s", "--exec", "command", "--retro")
+        self.ok("predict", e, h, "--prediction", "enrichment > 5", "--metric", "m", "--rule", "supported if > 5")
+        reason = self.gate("nb freeze %s" % e[:6])
+        self.assertIn("Steering baseline", reason)
+        self.assertIn("supported if > 5", reason)
+        self.assertIn("retrospective", reason)
+        self.assertIn("nb freeze", self.gate("nb freeze exp-zzzz"))  # unknown id: still asks, no description
+
+
 def main():
     """Run the TestCase classes in parallel threads (the tests are subprocess-bound); classes are independent."""
     import io

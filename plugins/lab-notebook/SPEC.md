@@ -448,11 +448,16 @@ their names and types.
 Phase 2:
 
 - **SessionStart** runs `nb prime --hook-json`.
-- **PreToolUse** on Bash, `"if": "Bash(nb *)"`, runs `hooks/gate.py`. It
-  splits the command into simple commands (`&&`, `||`, `;`, `|`, newlines),
-  finds `nb` invoked by name or path, and returns `permissionDecision: "ask"`
-  with a one-line reason for gated commands and for any command that unsets
-  `CLAUDECODE`. Everything else passes through unchanged.
+- **PreToolUse** on every Bash call runs `hooks/gate.py` (no `if` filter:
+  it would miss `nb` called by path and commands that unset `CLAUDECODE`; a
+  call that mentions neither exits in about 30 ms). It scans the command
+  text for `nb` invoked by name or path followed by a gated verb, and
+  returns `permissionDecision: "ask"`. The reason shown to the user names the
+  node and what approving it means: for `freeze`, the title, predictions and
+  decision rules; for `confirm`, the claim, scope, confidence and who
+  proposed it. It also asks for any command that unsets or overrides
+  `CLAUDECODE`. A false match (the verb inside a quoted string) only costs an
+  extra prompt. Everything else passes through with no output.
 - **Skill** `lab-notebook`: when and how to record, the rules above in short,
   and a command cheat sheet. Its `allowed-tools` pre-approves read commands
   only.

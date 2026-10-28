@@ -68,8 +68,20 @@ Claude Code's Bash tool) are `claude`, everything else is `user`. Goals,
 conclusions, leads and decisions that Claude adds start `pending`. Four
 commands are yours to approve: `nb freeze` (approve an experiment design),
 `nb confirm` (establish a pending node), `nb invalidate` (withdraw a result)
-and `nb config set`. In phase 2 a hook makes Claude Code ask you before
-Claude runs any of them.
+and `nb config set`. A PreToolUse hook makes Claude Code ask you before
+Claude runs any of them, showing what you would be approving (for a freeze:
+the predictions and decision rules). Per the Claude Code docs a hook's "ask"
+still prompts in auto mode; in bypass mode (`--dangerously-skip-permissions`)
+it probably does not.
+
+At session start a hook runs `nb prime`, a briefing capped at 4,000
+characters: active goals, pending items, experiments in flight, open
+questions, recent conclusions and active leads. It prints nothing in a repo
+without a notebook. The `lab-notebook` skill tells Claude when and how to
+record, and pre-approves read-only commands (`nb show`, `context`, `path`,
+`query`, `pending`, `prime`, `lint`, `log`) while it is active; to allow them
+everywhere, add e.g. `Bash(nb show *)` to `permissions.allow` in your
+settings.
 
 ## Tests
 
