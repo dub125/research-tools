@@ -15,11 +15,20 @@
   "lease_expires": "2026-10-28T18:24:06.470535043Z",
   "defer_until": null,
   "created_at": "2026-10-28T16:19:48.258361244Z",
-  "updated_at": "2026-10-28T18:09:06.470535043Z",
+  "updated_at": "2026-10-28T18:11:30.002880922Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
-  "notes": [],
+  "notes": [
+    {
+      "id": "8585b5cc",
+      "at": "2026-10-28T18:11:30.002880141Z",
+      "author": "Dylan Wichman/c39f08f2",
+      "text": "Committed on nb-dev. Gate runs on every Bash call (no if-filter, which would miss nb by path and CLAUDECODE overrides); ~30 ms pass-through. Awaiting user's manual check in auto mode: trial repo at /tmp/claude-1001/-home-exouser-research-tools/c39f08f2-0eac-448a-a0fb-7780f4af73f6/scratchpad/nb-trial (BioEmu fixture + foam + foam hooks).",
+      "commit": "dc821ad",
+      "branch": "nb-dev"
+    }
+  ],
   "stamps": {
     "created": {
       "commit": "05ac9d4",
