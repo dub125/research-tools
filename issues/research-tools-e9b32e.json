@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-e9b32e",
+  "title": "nb read commands: prime lacks --json, path caps at 20, prime lint count is partial, leads never marked retro",
+  "body": "Found in the spec-vs-code review of branch `worktree-agent-af4147e78b41b3bce` on 2026-11-09. Line numbers are that branch.\n\n- `nb prime --json` is refused; SPEC says every read command takes `--json`.\n- `Graph.paths` defaults to `limit=20` (`bin/nb` line 409) and `nb path` prints no \"+N more\"; SPEC says every path. `has_active_goal` uses a limit of 200 (read only).\n- `nb path` prints a one-line lineage summary, not the lineage chain (reviewer-reported, not checked).\n- Prime calls `lint(g, full=False)`, which skips three lint rows, so its count can differ from `nb lint`.\n- `Graph.retro` (line 476) returns False for a lead, so a lead resting on a retrospective experiment is unmarked in prime, show, context and query.\n- Prime line formats differ from the spec example in small ways (type prefix, `1 results`, extra header clause).",
+  "type": "bug",
+  "status": "open",
+  "priority": 3,
+  "labels": [
+    "lab-notebook"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-11-09T22:24:13.98556322Z",
+  "updated_at": "2026-11-09T22:24:13.98556322Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "9d60a12",
+      "branch": "worktree-agent-af4147e78b41b3bce"
+    },
+    "closed": null
+  }
+}
