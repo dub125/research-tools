@@ -13,11 +13,20 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-11-09T17:02:55.432965486Z",
-  "updated_at": "2026-11-09T17:02:55.432965486Z",
+  "updated_at": "2026-11-09T17:06:42.723497333Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
-  "notes": [],
+  "notes": [
+    {
+      "id": "e509f662",
+      "at": "2026-11-09T17:06:42.723496421Z",
+      "author": "Dylan Wichman/7dfeebce",
+      "text": "Decided with user 2026-11-09: nb audit <con> gathers the conclusion, its results, each source experiment frozen design with its rule and deviations, uncited sibling results, results added later, and other conclusions on the same question. A fresh read-only subagent runs the audit (Sonnet by default, configurable). It checks: backed, rule-faithful, scoped, one claim, not cherry-picked, consistent, alternatives. It runs automatically on a pending conclusion before confirm. /nb-audit runs a graph-wide sweep that records an audit on each conclusion involved; structural checks stay in lint. The auditor returns findings and the main agent records them with nb add audit, ungated.",
+      "commit": "441948a",
+      "branch": "nb-dev"
+    }
+  ],
   "stamps": {
     "created": {
       "commit": "441948a",
