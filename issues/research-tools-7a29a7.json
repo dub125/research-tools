@@ -13,7 +13,7 @@
   "lease_expires": "2026-11-09T21:16:39.502902675Z",
   "defer_until": null,
   "created_at": "2026-11-09T16:39:02.831187169Z",
-  "updated_at": "2026-11-09T21:50:07.979246132Z",
+  "updated_at": "2026-11-09T21:59:48.987443884Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
@@ -119,6 +119,14 @@
       "at": "2026-11-09T21:50:07.979241804Z",
       "author": "Dylan Wichman/7dfeebce",
       "text": "Implemented on branch worktree-agent-af4147e78b41b3bce (3873614, 61c63d4, 1bd7c7e): 166 tests pass, plugin validate passes. Not merged. Dry run on a copy of the bioemu notebook: 0 errors, 38 warnings, and with the gate on 65 items would block. Problems found on real data: (1) brief lines use result titles, which in bioemu are summary text (\"Frozen rule: supported: ...\"), so lines do not say which run; (2) the possibly-related tier matches only result titles and treats common words (villin, core, endpoints) as equal to \"run 19\", so run 19's own two-state result res-8fe6 is missing from res-0kbx's brief even with --all. Proposed fix: also match on the experiment/exploration title, weight tokens by rarity, show the experiment name on each line. Also: same-date event order falls back to experiment id; proposed recording a timestamp on verdict and confirm-also events instead.",
+      "commit": "16cdada",
+      "branch": "nb-dev"
+    },
+    {
+      "id": "ea86c992",
+      "at": "2026-11-09T21:59:48.987437522Z",
+      "author": "Dylan Wichman/7dfeebce",
+      "text": "Decided 2026-11-09: no text matching in the brief. It follows links only, and lineage is fixed upstream instead. uses may target an experiment or exploration (its outputs); freeze requires variant-of, uses or an explicit fresh, and the freeze prompt shows them by name; brief lines show the experiment name; the auditor searches for unlinked evidence and reports it as a missing link; verdict and confirm-also events carry a UTC time (at). SPEC commit 8bcd882 on the worktree branch; implementer resumed.",
       "commit": "16cdada",
       "branch": "nb-dev"
     }
