@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-2cfbdd",
+  "title": "nb: an empty CLAUDECODE= counts as the user",
+  "body": "Found in the spec-vs-code review of branch `worktree-agent-af4147e78b41b3bce` on 2026-11-09. Line numbers are that branch.\n\nSPEC (Authorship): author is `claude` when the environment has `CLAUDECODE` set.\n\n`bin/nb` line 203 tests truthiness, so `CLAUDECODE= nb add goal G` is authored by the user. The gate hook does prompt for that form, so this is a second line of defence only.",
+  "type": "bug",
+  "status": "open",
+  "priority": 3,
+  "labels": [
+    "lab-notebook"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-11-09T22:24:14.061099661Z",
+  "updated_at": "2026-11-09T22:24:14.061099661Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "9d60a12",
+      "branch": "worktree-agent-af4147e78b41b3bce"
+    },
+    "closed": null
+  }
+}
