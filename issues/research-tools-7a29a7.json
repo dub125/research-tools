@@ -13,7 +13,7 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-11-09T16:39:02.831187169Z",
-  "updated_at": "2026-11-09T17:32:43.938972281Z",
+  "updated_at": "2026-11-09T17:35:31.182270599Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
@@ -87,6 +87,14 @@
       "at": "2026-11-09T17:32:43.938970528Z",
       "author": "Dylan Wichman/7dfeebce",
       "text": "Revised 2026-11-09: the check-in happens right after each result, not at freeze. The agent shows nb brief for that result (related results and the conclusions and leads they touch) and asks for the user's read. The answer is a conclusion or lead drafted from the user's words, or \"nothing yet\". The freeze gate blocks only while a result has not been reviewed. Conclusions do not need an answers link: drop --link answers from the skill example. Connectivity gap found: bioemu has 0 variant-of links (run lineage lives only in titles). The two-state explorations investigate q-3adm, separate from the run questions. xpl-zjfp (run 19 two-state) uses res-zpc6 and res-k8h7 but not run 19's own result res-0kbx. So the brief must follow uses in both directions, variant-of and shared hypothesis/question, plus a labelled \"possibly related, unlinked\" section found by tags and text.",
+      "commit": "441948a",
+      "branch": "nb-dev"
+    },
+    {
+      "id": "affe0d84",
+      "at": "2026-11-09T17:35:31.182262815Z",
+      "author": "Dylan Wichman/7dfeebce",
+      "text": "Decided 2026-11-09: nb brief is deterministic and involves no agent judgment. It is tiered: the new result and its verdict first, then directly linked items (same hypothesis, variant-of chain, uses), then the same question, then \"possibly related, not linked\". One line per item: name, verdict, key number. Each tier has a cap that ends in \"(+N more: <command>)\"; nothing is dropped silently, and caps live in config. The agent shows the brief as is: it may not drop lines or add its own read unless asked.",
       "commit": "441948a",
       "branch": "nb-dev"
     }
