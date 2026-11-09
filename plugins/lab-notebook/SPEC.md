@@ -16,6 +16,15 @@ This file defines the data model and storage. The `nb` CLI implements it and
 - Things that only Claude proposes (goals, conclusions, leads, decisions)
   start `pending` and become established only when the user runs or approves
   `nb confirm`.
+- A hypothesis is decided by the rule frozen with its experiment, not by a
+  conclusion. A **verdict** (supported, refuted, inconclusive) is recorded with
+  the result and applies at once, because the user approved the rule when
+  freezing. Conclusions are for interpretation: what results add up to,
+  across runs or beyond one rule.
+- Every result is **reviewed** with the user: a conclusion or lead drawn from
+  the user's own read, or "nothing yet". While the freeze gate is on, nothing
+  new is frozen while a result is unreviewed or an experiment is missing
+  verdicts. See [Closing the loop](#closing-the-loop).
 
 ## Storage
 
@@ -57,6 +66,12 @@ whose schema is newer than it knows. Adding an optional field with a default
 does not bump the schema; renaming, restructuring or adding a required field
 does, with a migration function in `bin/nb`.
 
+The verdict, review and audit additions are optional fields and need no
+bump. In a notebook from before them: done experiments without verdicts are
+a lint warning until backfilled with `nb verdict`; every existing result
+counts as unreviewed, so `freeze_gate` stays off until the backlog is
+reviewed; conclusions and leads without `origin` stay valid.
+
 ### Sync
 
 `nb sync` exchanges the notebook with the `origin` remote:
@@ -66,12 +81,16 @@ does, with a migration function in `bin/nb`.
    against `git merge-base`, node by node:
    - a node changed on one side only takes that side;
    - a node changed on both sides is merged field by field. Append-only lists
-     (`log`, `links`, `refs`, `tags`, `deviations`, `runs`) are merged as
-     sets: an entry either side added is kept, an entry either side removed
-     (`unlink`, `retract`) stays removed, in base order and then each side's
-     new entries. A scalar changed on one side
+     (`log`, `links`, `refs`, `tags`, `deviations`, `runs`, `verdicts`,
+     `reviews`) are merged as sets: an entry either side added is kept, an
+     entry either side removed (`unlink`, `retract`) stays removed, in base
+     order and then each side's new entries. Both sides adding a verdict for
+     the same hypothesis is a conflict. A scalar changed on one side
      takes that side. A scalar changed differently on both sides is a
-     conflict.
+     conflict, except derived statuses (hypothesis status, an experiment's
+     `frozen`/`done`), which are recomputed from the merged graph.
+     Fields fixed at creation (`interim`, `origin`, `user_words`) cannot
+     differ.
 3. On any conflict, or if the merged graph fails validation, nothing is
    written and `nb sync` lists the nodes and fields. Resolve by changing one
    side with `nb` and syncing again.
@@ -130,7 +149,7 @@ An ambiguous prefix is an error that lists the matches.
 |---|---|---|
 | `id` | string | Required. See [IDs](#ids). Unique. |
 | `type` | string | Required. One of the types below. |
-| `title` | string | Required, one line. For claims (hypothesis, conclusion, lead, decision) the title is the claim itself. |
+| `title` | string | Required, one line. For claims (hypothesis, conclusion, lead, decision) the title is the claim itself. A conclusion or lead makes **one claim**: something that could be true or false on its own. "A, but B, so C" is three conclusions. Not enforced by `nb` (it cannot tell); the auditor checks it. |
 | `author` | `user` \| `claude` | Required. Set by `nb`, never by a flag. |
 | `created`, `updated` | date | Required. Set by `nb`. |
 | `status` | string | Required for every type except `audit`. Allowed values per type below. |
@@ -152,9 +171,9 @@ Unknown fields are errors.
 | `hypothesis` | open, supported, refuted, superseded | `prediction` (required): what should be observed if it holds |
 | `experiment` | draft, frozen, done, abandoned | see below |
 | `exploration` | draft, frozen, done, abandoned | see below |
-| `result` | valid, invalidated | `summary` (required, facts only), `provenance`, `metrics` |
-| `conclusion` | pending, supported, refuted, superseded, rejected | `rationale`, `scope`, `alternatives` (all required); `confidence` (`low` \| `medium` \| `high`); `confirmed_at` |
-| `lead` | pending, active, followed, dropped | `rationale` (required) |
+| `result` | valid, invalidated | `summary` (required, facts only), `provenance`, `metrics`, `interim` (bool), `reviews` (see [Review](#review)) |
+| `conclusion` | pending, supported, refuted, superseded, rejected | `rationale`, `scope`, `alternatives` (all required); `confidence` (`low` \| `medium` \| `high`); `confirmed_at`; `origin`, `user_words` (see below) |
+| `lead` | pending, active, followed, dropped | `rationale` (required); `origin`, `user_words` (see below) |
 | `decision` | pending, active, superseded, rejected | `rationale` (required), `rejected` (list: alternatives considered and not taken), `revisit_if` |
 | `audit` | none | `verdict` (`sound` \| `concerns` \| `unsound`), `findings` (required), `auditor`, `audited_at` |
 
@@ -163,6 +182,21 @@ Claude and established (`active`, `supported`, `active`, `active`) when
 authored by the user. A lead that was taken up is `followed` (it raised a
 question or spawned a hypothesis, experiment or exploration); whether it panned out is told by the
 conclusions downstream, not by the lead.
+
+**Origin of a conclusion or lead.** `origin` is `user` when it was drafted
+from the user's own read, and `claude` when it is Claude's read, given because
+the user asked for it. `user_words` holds the user's read verbatim and is
+required when `origin` is `user`. Both are required at creation for a
+Claude-authored conclusion or lead (older nodes without them stay valid), and
+both are fixed once set. A user-authored node needs neither. The confirm prompt,
+`show` and `prime` display the origin, so the user can always tell their own
+reading from Claude's. A conclusion does not need to answer a question:
+`answers` is optional, and findings that turned up along the way are
+conclusions like any other.
+
+**Interim results.** `nb result --interim` records a partial result (a run
+stopped part-way, a first batch). It carries no verdicts, does not close
+anything and is not reviewed on its own; the final result is.
 
 **Experiment and exploration** share one schema. The difference is the
 evidence tier: an exploration looks at data without a hypothesis and can only
@@ -182,6 +216,7 @@ not another result of the frozen experiment.
 | `frozen_at` | string | Set by `freeze`: the notebook version at freezing. |
 | `deviations` | list of `{date, author, text}` | Append-only after freezing: anything done differently from the spec, and why. |
 | `runs` | list of `{date, command, commit, dirty, cwd}` | Run attempts, appended by the run hook (phase 3). Shown next to results so that "1 result from 4 runs" is visible. |
+| `verdicts` | list of `{hypothesis, verdict, result, basis, date, author, replaces?, reason?}` | Experiment only. Append-only history, written only by `nb result --verdict` and `nb verdict`. `verdict` is `supported`, `refuted` or `inconclusive`; `result` is the result it was judged on; `basis` is the measured value and the bound it was compared to (`jsd_tp 0.312 >= 0.295`). A replacement is a new entry with `replaces: true` and a `reason`. The **current** verdict for a hypothesis is its last entry whose result is still valid. See [Verdicts](#verdicts). |
 
 **Result** `provenance` is an object, captured automatically where possible:
 
@@ -218,7 +253,7 @@ Edges are stored in the `links` of the node they start from. The CLI keeps
 | `raises` | lead | question |
 | `spawns` | lead | hypothesis, experiment, exploration |
 | `supports`, `contradicts` | result, conclusion, source | hypothesis, conclusion |
-| `audits` | audit | conclusion |
+| `audits` | audit | conclusion, lead |
 | `supersedes` | goal, hypothesis, conclusion, decision | same type |
 | `variant-of` | experiment, exploration | same type |
 | `uses` | experiment, exploration | result (existing data it analyses) |
@@ -252,17 +287,27 @@ CLI.
 - **Required structure at creation.** A question `refines` something. A
   hypothesis `addresses` a question. An exploration `investigates` a
   question. A conclusion has at least one `derived-from`. A lead has at least
-  one `suggested-by`. An audit `audits` exactly one conclusion.
+  one `suggested-by`. An audit `audits` exactly one conclusion or lead. A
+  Claude-authored conclusion or lead has an `origin` (and `user_words` when
+  the origin is `user`). This is checked at creation only, so older nodes
+  without them stay valid.
 - **Freezing** (`nb freeze`) requires `spec`, `execution`, and a path to an
-  active goal; for an experiment also at least one complete prediction.
+  active goal; for an experiment also at least one complete prediction. While
+  `freeze_gate` is on it also requires a clear [freeze gate](#the-freeze-gate).
 - **Frozen specs are immutable.** After freezing, `title`, `spec`,
   `execution` and `predictions` cannot change. Only `deviations`, `runs`,
-  `body`, `refs`, `tags`, links (see above) and status may change. A
+  `verdicts` (through the verdict commands only), `body`, `refs`, `tags`,
+  links (see above) and status may change. A
   deviation is a change to the procedure (a run killed and restarted, a
   different seed count); a new analysis is a new node.
 - **Results** are added only to a frozen experiment or exploration (`nb
   result` adds the result and the `produces` link). A result's fields never
-  change; `nb invalidate` sets it `invalidated` with a required reason.
+  change, except that `reviews` is appended to by `nb confirm`, `nb add` (a
+  user-authored conclusion or lead) and `nb nothing-yet`; `nb invalidate` sets
+  it `invalidated` with a required reason. Invalidating a result withdraws the
+  verdicts judged on it (see [Verdicts](#verdicts)). A `done` experiment takes
+  no more results: a rerun is a new experiment, `variant-of` the old one,
+  with its own frozen design.
 - **Conclusions** must derive from at least one valid result produced by an
   experiment. Results of explorations may be listed as context but cannot be
   the only basis. Leads may be suggested by results of either tier.
@@ -270,23 +315,224 @@ CLI.
   `active` decision or goal changes only by supersession or a status change
   with a reason; its other fields are frozen except `body`, `refs` and
   `tags`. To reword an active goal, add a new goal that supersedes it.
-- **Status changes need evidence where they assert something.** A hypothesis
-  becomes `supported` or `refuted` only if a `supported` conclusion
-  `supports` or `contradicts` it. A question becomes `answered` only if a
+- **Status changes need evidence where they assert something.** A
+  hypothesis's status follows [hypothesis status](#hypothesis-status) and is
+  not set by `nb status` except to `superseded`. A pending goal, conclusion,
+  lead or decision leaves `pending` only through `nb confirm` or `nb reject`,
+  never `nb status`. A question becomes `answered` only if a
   `supported` conclusion `answers` it, and `settled` only if an `active`
   decision `affects` it: `answered` means the project found out, `settled`
   means it chose without establishing a fact. `abandoned`, `parked`, `dropped`,
   `rejected` and an experiment's `abandoned` need `--reason`. An experiment
-  becomes `done` only if it has produced at least one result.
+  becomes `done` automatically when every predicted hypothesis has a current
+  verdict, and not otherwise. An exploration becomes `done` by `nb status`
+  once it has at least one result, as before. A `done` experiment returns to
+  `frozen` if invalidation withdraws one of its verdicts (logged).
 - **Audits** are immutable once added. An audit never changes the audited
-  conclusion; a `concerns` or `unsound` verdict appears in `prime` and `lint`
-  for the user to act on.
+  conclusion or lead; a `concerns` or `unsound` verdict appears in `prime` and
+  `lint` for the user to act on; only the latest audit of a node counts. While
+  `audit_before_confirm` is on, a Claude-authored conclusion or lead cannot be
+  confirmed unless its latest audit is **current**: the node's own fields,
+  other than `tags`, `refs` and `log`, are unchanged since that audit's
+  `audited_at`.
 - **Unlinking** is allowed only while the source node is in its initial
   status (draft, open, pending), and never for the required links above.
   A mistaken `supports` or `contradicts` link on any node (a result, an
   established conclusion) is removed with `nb retract`, which is gated and
   records the reason in the node's log. Removing a link that a node requires
   is refused like any other write that introduces a validation error.
+
+## Closing the loop
+
+A result goes through three steps before the project moves on: its
+experiment's hypotheses get verdicts, the user reviews it, and anything
+concluded from it is audited and confirmed. The freeze gate makes sure none
+of these is skipped.
+
+```text
+nb result --verdict ...   ->  hypotheses supported/refuted, experiment done   (automatic)
+nb brief <res>            ->  facts shown, user gives their read
+  conclusion/lead drafted from the user's words  ->  audit  ->  nb confirm   (gated)
+  or: nb nothing-yet <res>                                                  (gated)
+```
+
+### Verdicts
+
+A verdict applies an experiment's frozen decision rule to a result. It is
+recorded with the result (`nb result <exp> ... --verdict <hyp> <verdict>
+<basis>`, once per predicted hypothesis) or added later (`nb verdict`).
+
+- Only an experiment's predicted hypotheses get verdicts, and only from a
+  valid, non-interim result of that experiment. Explorations have none. If any
+  `--verdict` names a hypothesis the experiment does not predict, or is
+  otherwise invalid, the whole `nb result` is refused.
+- `basis` is required: the measured value and the bound from the rule
+  (`jsd_tp 0.312 >= 0.295; refuted band`). The value must appear in the
+  result's summary or metrics; `nb` checks only that `basis` is non-empty, and
+  the auditor sweep checks the rest.
+- The verdict applies at once (see [hypothesis status](#hypothesis-status)).
+  When every predicted hypothesis has a current verdict, the experiment
+  becomes `done`.
+- Adding a verdict for a hypothesis that has no current verdict from this
+  experiment is not gated; that is the normal, automatic path, used late only
+  for backfilling. Any second verdict for the same hypothesis from the same
+  experiment, whether from the same result or another one, is a replacement:
+  `nb verdict ... --replace --reason R`, gated, appended with `replaces: true`.
+- Verdicts on a `retrospective` experiment are marked `retro` in `show`,
+  `brief` and `audit`: the rule was written after the results existed.
+- Invalidating a result withdraws its verdicts: they stop being current, and
+  the hypothesis status and experiment status are recomputed.
+
+### Hypothesis status
+
+A hypothesis's status is derived, not stored by hand:
+
+- `superseded` once a newer hypothesis supersedes it. Verdicts and conclusions
+  no longer change it.
+- Otherwise, the most recent **status event** decides, in notebook order:
+  - a current verdict counts as an event: `supported` → `supported`,
+    `refuted` → `refuted`, `inconclusive` → `open`;
+  - a `nb confirm --also` that applies a conclusion's `supports` or
+    `contradicts` to it counts as an event: `supported` or `refuted`.
+- No events → `open`.
+
+`nb` recomputes this after every write that adds or withdraws an event
+(result, verdict, confirm, invalidate, sync) and logs each change with the
+event that caused it. Two current verdicts from different experiments that
+disagree are a lint warning.
+
+### Review
+
+Every valid, non-interim result is reviewed with the user. Reviews are
+recorded in the result's `reviews` list, an append-only list of
+`{date, author, kind, by?, note?}`; a result is **reviewed** once the list is
+non-empty, and it stays reviewed whatever happens to the node that reviewed it
+later (superseded, refuted, dropped). Entries are written by:
+
+- `nb confirm` of a conclusion or lead: `kind: "confirmed"`, `by: <id>`, on
+  every result it rests on (`derived-from` or `suggested-by`). A pending
+  draft writes nothing, so the review finishes only when the user confirms; a
+  rejected draft never writes one;
+- `nb add` of a user-authored conclusion or lead, which is established at
+  once: the same entry;
+- `nb nothing-yet <res>... [--note N]`: `kind: "nothing-yet"`. Gated: only the
+  user decides there is nothing to conclude.
+
+A review covers whatever results the conclusion rests on, so one conclusion
+drawn across five runs reviews all five. A result marked "nothing yet" can
+still back a conclusion later. Results of abandoned experiments still need a
+review ("nothing yet" is enough).
+
+The review starts from [`nb brief`](#brief). Claude shows it, asks for the
+user's read, and holds its own read until the user has given theirs or asked
+for it. A conclusion drafted from the user's read has `origin: user` and the
+user's words in `user_words`.
+
+### The freeze gate
+
+While `freeze_gate` is on, `nb freeze` is refused if any of these exist, and
+the error lists them by id and title:
+
+- a frozen experiment with a valid, non-interim result but a predicted
+  hypothesis without a verdict;
+- a valid, non-interim result that is not reviewed.
+
+Experiments and explorations that are frozen but have no results yet do not
+block: they are running in parallel. Interim results do not block, but an
+experiment or exploration whose only results are interim and older than
+`pending_days` is listed under "Needs closing" in `prime` and warned by
+`lint`, so `--interim` cannot quietly hold work open. The gate is
+enforced by `nb` itself, so it applies to the user's own `nb freeze` as well as
+Claude's. `freeze_gate` defaults to off; a notebook with a backlog turns it on
+once the backlog is reviewed.
+
+### Brief
+
+`nb brief <res>` prints what the user needs in order to draw a conclusion
+from a result. It is built by fixed rules, so the same graph always gives the
+same brief; Claude does not choose what goes in it. Tiers, in order:
+
+1. **This result:** its experiment, the verdicts judged on it with their
+   basis, and its summary.
+2. **Directly linked:** results of experiments on the same `variant-of` chain
+   (both directions), results this one's experiment `uses` and results whose
+   experiment `uses` this one, and the results of other experiments testing
+   the same hypotheses.
+3. **Same question:** other results under the questions this result's
+   hypotheses address or its exploration investigates.
+4. **Possibly related, not linked:** results that share a tag with this one,
+   or two or more title tokens (words of four or more letters not on a stop
+   list, and `run <n>`-style names). Ranked by the number of shared tags and
+   tokens, then by recency. This tier is labelled as unlinked; a hit usually
+   means a link is missing.
+
+Each item is one line: id, title, verdict and basis where there is one
+(marked `retro` on a retrospective experiment), and review state
+(`unreviewed`, `pending: <id>` when only a pending draft rests on it,
+`nothing yet`, or the confirmed conclusion or lead that reviewed it). Interim
+results are marked `interim`; invalidated results are left out of tiers 2-4.
+`nb brief` on an interim or invalidated result works and says so in its
+first line.
+After the tiers come the established and pending conclusions and leads that
+rest on any listed result, and the open questions involved. Each tier shows at
+most `brief_tier_limit` items (`brief_related_limit` for tier 4), most recent
+first except the variant-of chain, which is in chain order, then
+`(+N more: nb brief <res> --all)`. Nothing is left out silently.
+
+```text
+# Brief: res-0kbx  Run 19 (run 18 with mean loss and clip 12): villin jsd_tp 0.247 ...
+experiment exp-9qe0 (done)  verdict hyp-yp39 supported: jsd_tp 0.247 in 0.227-0.267
+## Directly linked
+res-v0n5  Run 18 ...                           hyp-68h6 supported   reviewed: nothing yet
+res-qv9n  Run 16 ...                           hyp-gtc3 supported   unreviewed
+## Same question (q-35qb: Does adding ONE_cath1 ...)
+res-d148  Run 17 ...                           hyp-qc5b refuted     unreviewed
+(+4 more: nb brief res-0kbx --all)
+## Possibly related, not linked
+res-8fe6  Two-state proteins with run 19 ...   shares: run 19, two-state   unreviewed
+## Conclusions and leads on these results
+(none)
+```
+
+### Audit
+
+`nb audit <con|lead>` prints the bundle an auditor needs, and nothing else:
+
+- the node, including `origin` and `user_words`;
+- every result it rests on, with summary, metrics and provenance;
+- for each of those results, its experiment's frozen spec, predictions,
+  decision rules, verdicts and deviations;
+- the other results of those experiments that the node does not cite;
+- results added to those experiments, or with links to the same hypotheses
+  and questions, since the node was created;
+- the other conclusions and leads on the same questions and hypotheses;
+- tier 4 of the brief for each cited result (possibly related, not linked).
+
+The **auditor** is a subagent (`agents/nb-auditor.md`) with read-only tools
+(`nb show`, `context`, `brief`, `audit`, `query` and file reads for artifacts).
+It is given only the bundle, never the conversation, and it checks:
+
+| Check | Question |
+|---|---|
+| backed | Is every number and claim in the title and rationale in a cited result? |
+| rule-faithful | Do claims about hypotheses match the verdicts and the frozen rules? For a retrospective experiment, was the rule plausibly not fitted to the result? |
+| scoped | Is the claim no broader than the data (`scope`)? |
+| one claim | Is it one claim? |
+| complete | Are uncited results of the same experiments, unlinked possibly related results, invalidated results and deviations accounted for? |
+| consistent | Does it contradict a supported conclusion or a later result? |
+| alternatives | Are obvious alternatives missing from `alternatives`? |
+| faithful | For `origin: user`: does the draft add, drop or shift anything relative to `user_words`? |
+
+It returns a verdict (`sound`, `concerns`, `unsound`) and findings, one line
+per failed check. Claude records them with `nb add audit` (not gated: an
+audit only adds a warning). The auditor's model is `auditor_model`.
+
+`nb` cannot launch a subagent. It enforces only that a current audit exists
+before `nb confirm` on a Claude-authored conclusion or lead
+(`audit_before_confirm`); the skill has Claude run the auditor as soon as it
+drafts one. A sweep (`/nb-audit`) audits every supported
+conclusion; a cross-conclusion problem, such as two that contradict, is
+recorded as an audit on the more recent one, citing the other.
 
 ## Authorship
 
@@ -305,14 +551,18 @@ so when Claude runs them the user must approve:
 | Command | Why |
 |---|---|
 | `nb freeze` | Approving an experiment design. Claude cannot approve its own, so it cannot chain experiments. |
-| `nb confirm` | Making a pending goal, conclusion, lead or decision established. |
+| `nb confirm` | Making a pending goal, conclusion, lead or decision established, and any follow-on status changes named with `--also`. |
 | `nb invalidate` | Withdrawing a result. |
 | `nb retract` | Withdrawing a piece of evidence (a `supports` or `contradicts` link). |
-| `nb config set` | Changing thresholds and run-gating patterns. |
+| `nb verdict --replace` | Overriding how a frozen rule was applied. |
+| `nb nothing-yet` | Closing a review without a conclusion; only the user can decide there is nothing to conclude. |
+| `nb config set` | Changing thresholds, gates and run-gating patterns. |
 
 Plugins cannot ship permission rules, so the gate is a plugin PreToolUse hook
 (`hooks/gate.py`) that returns `ask` for these commands. A user running `nb`
-in their own terminal is not prompted.
+in their own terminal is not prompted. (The freeze gate in
+[Closing the loop](#the-freeze-gate) is separate: `nb` enforces it on every
+writer.)
 
 ## Lint
 
@@ -328,9 +578,15 @@ rules:
 | A `supported` conclusion derives from an invalidated result | error |
 | **Drift:** an experiment or exploration whose lineage passes through `drift_leads` or more leads | warn |
 | A `supported` conclusion has a `contradicts` from a node added after `confirmed_at` | warn |
-| A `supported` conclusion has an audit with verdict `concerns` or `unsound` | warn |
+| A `supported` conclusion whose latest audit has verdict `concerns` or `unsound` | warn |
 | A `supported` conclusion has fewer than `min_results_supported` derived-from results | warn |
-| A `supported` or `refuted` hypothesis, or an `answered` question, no longer has a `supported` conclusion behind it (it was superseded or refuted); a `settled` question no longer has an `active` decision | warn |
+| A verdict judged on an interim result, or on a result the experiment did not produce | error |
+| A `done` experiment has a predicted hypothesis without a current verdict (expected in notebooks from before verdicts, until backfilled with `nb verdict`) | warn |
+| An experiment or exploration whose only results are interim and older than `pending_days` | warn |
+| A `supported` or `refuted` hypothesis has neither a verdict nor a `supported` conclusion behind it that agrees; an `answered` question no longer has a `supported` conclusion behind it (it was superseded or refuted); a `settled` question no longer has an `active` decision | warn |
+| A hypothesis has conflicting current verdicts from different experiments | warn |
+| A valid, non-interim result has been unreviewed for more than `pending_days` (reported whether or not `freeze_gate` is on) | warn |
+| A pending conclusion or lead whose latest audit has verdict `concerns` or `unsound` | warn |
 | An `open` question has no path to an active goal (its goal was superseded and it was not re-linked, parked or abandoned) | warn |
 | A pending node is older than `pending_days` | warn |
 | A result's provenance commit is not reachable from any ref (squashed or deleted branch) | warn |
@@ -364,6 +620,11 @@ Stored in `meta.json`, read with `nb config get [key]`, changed with
 | `drift_leads` | 2 | Leads on a lineage chain before a drift warning. |
 | `min_results_supported` | 1 | Derived-from results a supported conclusion should have. |
 | `run_patterns` | [] | Phase 3: regexes for commands that launch runs. |
+| `freeze_gate` | false | Enforce the [freeze gate](#the-freeze-gate). |
+| `audit_before_confirm` | true | A Claude-authored conclusion or lead needs an up-to-date audit before `nb confirm`. |
+| `auditor_model` | `sonnet` | Model the auditor subagent runs on. |
+| `brief_tier_limit` | 8 | Items per brief tier before "(+N more)". |
+| `brief_related_limit` | 5 | Items in the brief's "possibly related, not linked" tier. |
 
 ## Prime
 
@@ -379,7 +640,10 @@ foam holds work and how-to facts; nb holds what the project found and why. Use n
 ## Goals
 goal-3kd2  Condition BioEmu on endpoints and committor to sample the TSE
 ## Awaiting the user (pending, not established)
-con-8fz1  Run-1 ControlNet ignores q direction        claude, 2026-10-28
+con-8fz1  Run-1 ControlNet ignores q direction        claude, from your read, audit sound, 2026-10-28
+## Needs closing
+res-d148  Run 17: run 16 with 10k steps ...           unreviewed (hyp-qc5b refuted)
+exp-maca  Run 14: run 13 with half the fast-folder draws   result in, verdict missing
 ## In flight (frozen)
 exp-q9w4  ControlNet run 2 on villin holdout           frozen 2026-10-27, 0 results, 1 run
 ## Open questions
@@ -391,7 +655,10 @@ lead-7tq1 The +0.3 folding bias comes from the starting structures
 ## Lint: 0 errors, 2 warnings (nb lint)
 ```
 
-Sections: active goals; pending nodes; frozen experiments and explorations
+Sections: active goals; pending nodes, with origin and audit verdict for
+conclusions and leads; needs closing (unreviewed results and experiments
+missing verdicts, oldest first, shown whether or not `freeze_gate` is on);
+frozen experiments and explorations
 with result and run counts; open questions under active goals, most recent
 first; supported conclusions, most recently confirmed first; active leads;
 lint counts. Conclusions show their `confidence`, and anything resting on a
@@ -417,15 +684,17 @@ their names and types.
 | Command | Effect |
 |---|---|
 | `nb init` | Create the ref if absent; add the fetch refspec and pre-push block if `origin` exists. Idempotent. |
-| `nb add <type> <title> [--body TEXT\|-] [--ref R]... [--tag T]... [--link REL:ID]... [type flags]` | Create a node; print its id. Type flags: `--prediction` (hypothesis); `--spec`, `--exec`, `--retro` (experiment), `--spec`, `--exec` (exploration); `--rationale`, `--scope`, `--alternatives`, `--confidence`, `--from RES`... (conclusion: `derived-from`); `--rationale`, `--from RES`... (lead: `suggested-by`); `--rationale`, `--reject ALT`..., `--revisit-if` (decision); `--of CON`, `--verdict`, `--findings`, `--auditor` (audit). A flag shown with `...` is repeated once per value. |
+| `nb add <type> <title> [--body TEXT\|-] [--ref R]... [--tag T]... [--link REL:ID]... [type flags]` | Create a node; print its id on stdout and `added <type> <id>: <title>` on stderr, so `$(nb add ...)` still captures the id and a reader sees what it is. Type flags: `--prediction` (hypothesis); `--spec`, `--exec`, `--retro` (experiment), `--spec`, `--exec` (exploration); `--rationale`, `--scope`, `--alternatives`, `--confidence`, `--from RES`..., `--origin user\|claude`, `--user-words TEXT\|-` (conclusion: `derived-from`); `--rationale`, `--from RES`..., `--origin`, `--user-words` (lead: `suggested-by`); `--rationale`, `--reject ALT`..., `--revisit-if` (decision); `--of ID`, `--verdict`, `--findings`, `--auditor` (audit). A flag shown with `...` is repeated once per value. |
 | `nb predict <exp> <hyp> --prediction P --metric M --rule R` | Add a prediction and the `tests` link (draft only). |
 | `nb link <from> <rel> <to>` / `nb unlink <from> <rel> <to>` | Add or remove an edge. |
 | `nb set <id> <field> <value>` | Change a mutable field. `--append` adds to a list field. |
 | `nb status <id> <status> [--reason R]` | Change status, subject to the rules above. |
-| `nb freeze <id>` | Freeze an experiment or exploration. Gated. |
+| `nb freeze <id>` | Freeze an experiment or exploration; prints the id and title. Gated, and refused while the [freeze gate](#the-freeze-gate) is blocked. |
 | `nb deviate <id> <text>` | Record a deviation on a frozen experiment or exploration. |
-| `nb result <exp> <summary> [--run-dir D] [--artifact P]... [--ext-id X]... [--metrics FILE] [--commit SHA] [--tag T]... [--link supports\|contradicts:ID]...` | Record a result with provenance; print its id. |
-| `nb confirm <id>` | Establish a pending node; apply its supersessions. Gated. |
+| `nb result <exp> <summary> [--interim] [--verdict HYP VERDICT BASIS]... [--run-dir D] [--artifact P]... [--ext-id X]... [--metrics FILE] [--commit SHA] [--tag T]... [--link supports\|contradicts:ID]...` | Record a result with provenance and apply its verdicts; print its id on stdout and the title, verdicts and any status changes on stderr. |
+| `nb verdict <res> <hyp> <verdict> --basis B [--replace --reason R]` | Add a verdict judged on an existing result (backfilling), or replace one (`--replace`, gated). |
+| `nb nothing-yet <res>... [--note N]` | Record that the user reviewed these results and has nothing to conclude yet. Gated. |
+| `nb confirm <id> [--also <id>]...` | Establish a pending node; apply its supersessions; with `--also`, apply the follow-on status changes it allows (hypothesis `supported`/`refuted`, question `answered`). `nb show` on a pending conclusion lists the follow-ons available. Gated; the prompt names each follow-on. |
 | `nb reject <id> --reason R` | Reject a pending node (`rejected`, or `dropped` for a lead). |
 | `nb invalidate <res> --reason R` | Invalidate a result. Gated. |
 | `nb retract <from> supports\|contradicts <to> --reason R` | Remove a mistaken evidence link from any node; logged. Gated. |
@@ -439,7 +708,10 @@ their names and types.
 | `nb prime [--hook-json] [--max-chars N]` | See [Prime](#prime). |
 | `nb context <id> [--depth N]` | The node plus its neighbourhood (default depth 1, both directions), one line per node. |
 | `nb path <id>` | Every path to a goal, and the lineage with leads marked. |
-| `nb pending` | Pending nodes awaiting the user. |
+| `nb pending` | Pending nodes awaiting the user, plus unreviewed results and experiments missing verdicts. |
+| `nb brief <res> [--all]` | See [Brief](#brief). |
+| `nb audit <con\|lead>` | The audit bundle; see [Audit](#audit). |
+| `nb gate` | Whether `nb freeze` would pass the freeze gate now, and if not, what blocks it. |
 | `nb query [--type T] [--status S] [--author A] [--tag T] [--since DATE] [--text S] [--all]` | Matching nodes, newest first, 50 unless `--all`. |
 | `nb log [-n N]` | Recent notebook commits. |
 | `nb config get [key]` | Config values. |
@@ -466,26 +738,39 @@ Phase 2:
   proposed it. It also asks for any command that unsets or overrides
   `CLAUDECODE`. A false match (the verb inside a quoted string) only costs an
   extra prompt. Everything else passes through with no output.
+  For `freeze` it first runs `nb gate`; if the gate is blocked it returns
+  `deny` with what blocks, rather than asking the user to approve a write `nb`
+  would refuse. For `confirm` the reason also shows the origin, the user's
+  words, the latest audit verdict with its findings, and each `--also`
+  follow-on.
 - **Skill** `lab-notebook`: when and how to record, the rules above in short,
   and a command cheat sheet. Its `allowed-tools` pre-approves read commands
-  only.
+  only. It sets how Claude talks about the graph: name a node by what it is
+  first and give the id after ("run 17, the 10k-step version of run 16
+  (exp-pb59)"), and never ask the user to decide about a bare id.
+- **Agent** `nb-auditor` (`agents/nb-auditor.md`): see [Audit](#audit).
+- **Command** `/nb-audit`: the audit sweep.
 
 ## Later phases (not specified yet)
 
 - **Run gating (phase 3).** A PreToolUse hook blocks commands matching
   `run_patterns` unless prefixed with `NB_EXP=<frozen id>` or `NB_SCRATCH=1`.
   A PostToolUse hook appends a run attempt to the experiment and injects:
-  report the facts first, a brief read clearly labeled as such is fine,
-  record no conclusions or leads, launch nothing further without asking.
-- **Design and interpret skills (phase 4)**, with `nb review <exp>`
-  (structural checks: path to goal, redundancy, contradicting conclusions,
-  ignored leads, `kt check` on relied-on concepts) and `nb similar`
-  (structural keys first: same hypothesis and metric, variant-of chains,
-  spec hash; title word overlap only as a fallback).
-- **Reviewer subagent and `nb audit <id>` bundle (phase 5)**, then `source`
-  nodes holding a citation key that must resolve in Zotero.
+  report the facts first; record the result with its verdicts under the
+  frozen rule; show `nb brief` and ask for the user's read, holding Claude's own
+  read until the user has given theirs or asked for it; launch nothing further
+  without asking.
+- **Design skill (phase 4)**, with `nb check <exp>` (structural checks on a
+  draft design: path to goal, redundancy, contradicting conclusions, ignored
+  leads, `kt check` on relied-on concepts). `nb similar` is replaced by the
+  brief's "possibly related" tier, reused with an experiment as the anchor.
+- `source` nodes holding a citation key that must resolve in Zotero.
 
 ## Deliberately not decided yet
 
 - Whether conclusion-strength rules should ever block rather than warn.
 - Whether `prime` should rank open questions by activity instead of recency.
+- Whether verdicts on a hypothesis tested by several experiments should
+  combine into something other than "most recent wins".
+- Whether the brief's "possibly related" matching needs more than tags and
+  title tokens (spec text, metric names).
