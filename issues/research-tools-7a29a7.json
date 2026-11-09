@@ -13,7 +13,7 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-11-09T16:39:02.831187169Z",
-  "updated_at": "2026-11-09T17:15:48.313514357Z",
+  "updated_at": "2026-11-09T17:18:15.946783815Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
@@ -63,6 +63,14 @@
       "at": "2026-11-09T17:15:48.313511963Z",
       "author": "Dylan Wichman/7dfeebce",
       "text": "User direction 2026-11-09: the frozen rule decides a hypothesis directly, with no conclusion node. The verdict (supported / refuted / inconclusive) goes with the result; the experiment closes once all its predictions have verdicts. Conclusions are then for interpretation only, and the user gives their read first. Checked in bioemu: each of the 33 hypotheses is tested by exactly one experiment, and the rules are three-way numeric bands. Open: whether applying a verdict needs approval. Risk: with experiments closing on verdicts, the gate no longer forces any interpretation, so cross-run findings could still go unrecorded; proposed a prime section listing questions whose hypotheses all have verdicts but no conclusion.",
+      "commit": "441948a",
+      "branch": "nb-dev"
+    },
+    {
+      "id": "e601f612",
+      "at": "2026-11-09T17:18:15.946778585Z",
+      "author": "Dylan Wichman/7dfeebce",
+      "text": "Decided 2026-11-09: verdicts apply automatically, and a wrong one is corrected with a gated nb status. The user still wants conclusions drawn. Proposed: a gate on each question. Once K experiments on a question (default 3) have closed since its last confirmed conclusion, nb freeze refuses another experiment on that question until either a confirmed conclusion answers it, or the user logs \"no conclusion yet: <reason>\", which resets the count. The agent shows the facts for those runs and asks the user for their read first, then drafts one-claim conclusions from what the user said. In bioemu, q-35qb (runs 13-19) has 7 experiments and 0 conclusions; q-d7mx (BBL, protein G, BBA) has 3 and 0; q-6j0r has 4 and 0.",
       "commit": "441948a",
       "branch": "nb-dev"
     }
