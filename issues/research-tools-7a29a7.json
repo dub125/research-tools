@@ -13,7 +13,7 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-11-09T16:39:02.831187169Z",
-  "updated_at": "2026-11-09T16:39:09.401879755Z",
+  "updated_at": "2026-11-09T16:45:32.530051205Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
@@ -23,6 +23,14 @@
       "at": "2026-11-09T16:39:09.401877872Z",
       "author": "Dylan Wichman/7dfeebce",
       "text": "## Evidence (bioemu-kinetics, 2026-11-09)\n- 7 conclusions, all 2026-10-30 to 11-02, each written after the user explicitly asked (\"write up some conclusions\", \"draw that conclusion\"). 0 leads ever.\n- Since 11-03: 31 results, 0 conclusions. 13 of 51 results back any conclusion.\n- All 33 hypotheses are open, though 10 results state the frozen-rule verdict in the summary (\"Frozen rule: refuted ...\").\n- 30 of 31 frozen experiments/explorations have results but none was set to done, so the prime \"In flight\" section is mostly finished work.\n- Transcripts: after a result the agent gives a labelled \"My read\" in chat (~12+), offered to record a conclusion 0 times, declined once (\"Not recorded ... stays mine until you want it recorded\"), and steered to the next experiment ~6-8 times. The user always replied with the next action.\n- Cause: SKILL.md \"Record no conclusions or leads ... unless the user asks\" and \"Interpreting (only when asked)\". Pending + the gated confirm already gives the user the veto, so this second guard is redundant. No prime section or lint rule surfaces unconcluded results.\n- Side: prime runs lint without the provenance checks, so it reported 1 warning while nb lint reports 12 (missing docs/figures artifacts).",
+      "commit": "441948a",
+      "branch": "nb-dev"
+    },
+    {
+      "id": "a05d2dad",
+      "at": "2026-11-09T16:45:32.530049752Z",
+      "author": "Dylan Wichman/7dfeebce",
+      "text": "User proposal (2026-11-09): block new experiments while earlier ones have no conclusion, except experiments running in parallel. Proposed shape, still open: gate nb freeze rather than nb add; an experiment that has results blocks new freezes until it is closed (done with a conclusion, or done with --no-conclusion and a reason); an experiment with no results yet counts as running in parallel. Undecided: whether explorations are gated too; whether a pending conclusion unblocks or a confirmed one is required; how to handle the backlog (16 experiments and 14 explorations are frozen with results); whether parallel is implicit or a flag.",
       "commit": "441948a",
       "branch": "nb-dev"
     }
