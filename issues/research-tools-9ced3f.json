@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-9ced3f",
+  "title": "nb init: the pre-push block can fail the code push when nb is missing",
+  "body": "Found in the spec-vs-code review of branch `worktree-agent-af4147e78b41b3bce` on 2026-11-09. Line numbers are that branch.\n\nSPEC (Sync): the pre-push block never fails the code push.\n\nThe block (`bin/nb` around line 1031) ends with `[ -x \"$NB\" ] && { ... }`. When nb is not on PATH and the recorded plugin path no longer exists, that test is the last command and the hook exits 1. A reviewer reproduced exit 1 with the path replaced. Applies when the block is last in the hook.",
+  "type": "bug",
+  "status": "open",
+  "priority": 2,
+  "labels": [
+    "lab-notebook"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-11-09T22:24:14.022252187Z",
+  "updated_at": "2026-11-09T22:24:14.022252187Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "9d60a12",
+      "branch": "worktree-agent-af4147e78b41b3bce"
+    },
+    "closed": null
+  }
+}
