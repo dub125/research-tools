@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-1514f4",
+  "title": "nb: confirm and user-authored add write review entries on interim and invalidated results",
+  "body": "Found in the spec-vs-code review of branch `worktree-agent-af4147e78b41b3bce` on 2026-11-09. Line numbers are that branch.\n\nSPEC: an interim result \"is not reviewed on its own\", and reviews are for valid, non-interim results. It also says confirm writes a review on every result the node rests on.\n\n`establish` (`bin/nb` lines 721-725) adds a review to every `derived-from` or `suggested-by` result with no interim or validity check. `nb nothing-yet` refuses both. Reproduced by two reviewers.\n\nDecide which reading is intended, then make the two paths agree.",
+  "type": "decision",
+  "status": "open",
+  "priority": 3,
+  "labels": [
+    "lab-notebook"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-11-09T22:24:13.948364443Z",
+  "updated_at": "2026-11-09T22:24:13.948364443Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "9d60a12",
+      "branch": "worktree-agent-af4147e78b41b3bce"
+    },
+    "closed": null
+  }
+}
