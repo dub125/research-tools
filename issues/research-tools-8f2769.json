@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-8f2769",
+  "title": "nb audit: results_since can never list new results of the cited experiments",
+  "body": "Found in the spec-vs-code review of branch `worktree-agent-af4147e78b41b3bce` on 2026-11-09. Line numbers are that branch.\n\nSPEC (Audit): the bundle includes \"results added to those experiments, or with links to the same hypotheses and questions, since the node was created\".\n\n`bin/nb` builds `results_since` with `if r not in uncited`, and `uncited` is every non-cited result of those experiments. A later result of a cited experiment appears under uncited results with nothing marking it as newer than the node. Reproduced by a reviewer.\n\nAlso, by reading only: the comparison is on dates (`created >= n[\"created\"]`), so a same-day result recorded before the node counts as since.",
+  "type": "bug",
+  "status": "open",
+  "priority": 2,
+  "labels": [
+    "lab-notebook"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-11-09T22:24:13.837542249Z",
+  "updated_at": "2026-11-09T22:24:13.837542249Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "9d60a12",
+      "branch": "worktree-agent-af4147e78b41b3bce"
+    },
+    "closed": null
+  }
+}
