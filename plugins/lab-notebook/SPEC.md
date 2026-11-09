@@ -206,8 +206,19 @@ experiment's data, is a new exploration (or a new experiment with its own
 frozen predictions) that `uses` the earlier result. It is not a deviation and
 not another result of the frozen experiment.
 
+**What a design builds on.** An experiment or exploration that changes an
+earlier one is `variant-of` it ("run 19 = run 18 with mean loss"). One that
+uses another's outputs, such as its trained checkpoint or the dataset it
+generated, `uses` that experiment or exploration, even before it has results
+("two-state check of run 19 `uses` run 19"). One that analyses an existing
+result `uses` that result. Work that builds on nothing in the notebook is
+marked `fresh` (`nb add ... --fresh`, or `nb set <id> fresh true` while
+draft). Freezing requires at least one of these, so lineage is stated when the
+design is approved rather than reconstructed later.
+
 | Field | Type | Rule |
 |---|---|---|
+| `fresh` | bool | Builds on nothing in the notebook; see above. Settable while draft. |
 | `retrospective` | bool | Set only at creation (`nb add experiment --retro`). The spec and predictions were written after the results existed, e.g. when backfilling a project. Freezing still applies, but everything built on it is marked `retro` in `show`, `context`, `path` and `prime`. |
 | `spec` | string | What will be done, on what data, with what command or procedure. Required to freeze. |
 | `execution` | `command` \| `analysis` \| `manual` | Required to freeze. `command`: training, sampling, batch jobs. `analysis`: a script or notebook over existing data. `manual`: wet lab, external tools, human input. |
@@ -216,7 +227,7 @@ not another result of the frozen experiment.
 | `frozen_at` | string | Set by `freeze`: the notebook version at freezing. |
 | `deviations` | list of `{date, author, text}` | Append-only after freezing: anything done differently from the spec, and why. |
 | `runs` | list of `{date, command, commit, dirty, cwd}` | Run attempts, appended by the run hook (phase 3). Shown next to results so that "1 result from 4 runs" is visible. |
-| `verdicts` | list of `{hypothesis, verdict, result, basis, date, author, replaces?, reason?}` | Experiment only. Append-only history, written only by `nb result --verdict` and `nb verdict`. `verdict` is `supported`, `refuted` or `inconclusive`; `result` is the result it was judged on; `basis` is the measured value and the bound it was compared to (`jsd_tp 0.312 >= 0.295`). A replacement is a new entry with `replaces: true` and a `reason`. The **current** verdict for a hypothesis is its last entry whose result is still valid. See [Verdicts](#verdicts). |
+| `verdicts` | list of `{hypothesis, verdict, result, basis, date, at, author, replaces?, reason?}` | Experiment only. Append-only history, written only by `nb result --verdict` and `nb verdict`. `verdict` is `supported`, `refuted` or `inconclusive`; `result` is the result it was judged on; `basis` is the measured value and the bound it was compared to (`jsd_tp 0.312 >= 0.295`). A replacement is a new entry with `replaces: true` and a `reason`. `at` is the UTC time of the write (`YYYY-MM-DDTHH:MM:SSZ`), used to order status events. The **current** verdict for a hypothesis is its last entry whose result is still valid. See [Verdicts](#verdicts). |
 
 **Result** `provenance` is an object, captured automatically where possible:
 
@@ -256,7 +267,7 @@ Edges are stored in the `links` of the node they start from. The CLI keeps
 | `audits` | audit | conclusion, lead |
 | `supersedes` | goal, hypothesis, conclusion, decision | same type |
 | `variant-of` | experiment, exploration | same type |
-| `uses` | experiment, exploration | result (existing data it analyses) |
+| `uses` | experiment, exploration | result (existing data it analyses); experiment, exploration (its outputs: a checkpoint, a dataset) |
 | `based-on` | decision | result, conclusion |
 | `affects` | decision | goal, question, hypothesis, experiment, exploration |
 
@@ -292,7 +303,9 @@ CLI.
   the origin is `user`). This is checked at creation only, so older nodes
   without them stay valid.
 - **Freezing** (`nb freeze`) requires `spec`, `execution`, and a path to an
-  active goal; for an experiment also at least one complete prediction. While
+  active goal; for an experiment also at least one complete prediction; and
+  at least one `variant-of` or `uses` link, or `fresh` (see "What a design
+  builds on" under [Types](#types)). While
   `freeze_gate` is on it also requires a clear [freeze gate](#the-freeze-gate).
 - **Frozen specs are immutable.** After freezing, `title`, `spec`,
   `execution` and `predictions` cannot change. Only `deviations`, `runs`,
@@ -389,11 +402,13 @@ A hypothesis's status is derived, not stored by hand:
 
 - `superseded` once a newer hypothesis supersedes it. Verdicts and conclusions
   no longer change it.
-- Otherwise, the most recent **status event** decides, in notebook order:
+- Otherwise, the most recent **status event** decides, ordered by its `at`
+  time (ties broken by position in the list or log):
   - a current verdict counts as an event: `supported` → `supported`,
     `refuted` → `refuted`, `inconclusive` → `open`;
   - a `nb confirm --also` that applies a conclusion's `supports` or
-    `contradicts` to it counts as an event: `supported` or `refuted`.
+    `contradicts` to it counts as an event: `supported` or `refuted`. It is
+    stored as a `confirm-also` entry in the hypothesis's log, with `at`.
 - No events → `open`.
 
 `nb` recomputes this after every write that adds or withdraws an event
@@ -450,32 +465,30 @@ once the backlog is reviewed.
 
 `nb brief <res>` prints what the user needs in order to draw a conclusion
 from a result. It is built by fixed rules, so the same graph always gives the
-same brief; Claude does not choose what goes in it. Tiers, in order:
+same brief; Claude does not choose what goes in it. It follows links only and
+does no text matching: a result that should appear but does not is a missing
+link, fixed with `nb link`. Tiers, in order:
 
 1. **This result:** its experiment, the verdicts judged on it with their
    basis, and its summary.
 2. **Directly linked:** results of experiments on the same `variant-of` chain
-   (both directions), results this one's experiment `uses` and results whose
-   experiment `uses` this one, and the results of other experiments testing
-   the same hypotheses.
+   (both directions); `uses` in both directions, whether the link points at
+   a result or at the experiment or exploration that produced it; and the
+   results of other experiments testing the same hypotheses.
 3. **Same question:** other results under the questions this result's
    hypotheses address or its exploration investigates.
-4. **Possibly related, not linked:** results that share a tag with this one,
-   or two or more title tokens (words of four or more letters not on a stop
-   list, and `run <n>`-style names). Ranked by the number of shared tags and
-   tokens, then by recency. This tier is labelled as unlinked; a hit usually
-   means a link is missing.
 
-Each item is one line: id, title, verdict and basis where there is one
+Each item is one line: id, the name of the experiment or exploration that
+produced it (its title, shortened), verdict and basis where there is one
 (marked `retro` on a retrospective experiment), and review state
 (`unreviewed`, `pending: <id>` when only a pending draft rests on it,
 `nothing yet`, or the confirmed conclusion or lead that reviewed it). Interim
-results are marked `interim`; invalidated results are left out of tiers 2-4.
+results are marked `interim`; invalidated results are left out of tiers 2-3.
 `nb brief` on an interim or invalidated result works and says so in its
 first line.
 After the tiers come the established and pending conclusions and leads that
 rest on any listed result, and the open questions involved. Each tier shows at
-most `brief_tier_limit` items (`brief_related_limit` for tier 4), most recent
+most `brief_tier_limit` items, most recent
 first except the variant-of chain, which is in chain order, then
 `(+N more: nb brief <res> --all)`. Nothing is left out silently.
 
@@ -483,13 +496,11 @@ first except the variant-of chain, which is in chain order, then
 # Brief: res-0kbx  Run 19 (run 18 with mean loss and clip 12): villin jsd_tp 0.247 ...
 experiment exp-9qe0 (done)  verdict hyp-yp39 supported: jsd_tp 0.247 in 0.227-0.267
 ## Directly linked
-res-v0n5  Run 18 ...                           hyp-68h6 supported   reviewed: nothing yet
-res-qv9n  Run 16 ...                           hyp-gtc3 supported   unreviewed
+res-v0n5  Run 18: run 13 at 30k steps ...       hyp-68h6 supported   reviewed: nothing yet
+res-8fe6  Two-state proteins with run 19 ...    (exploration)        unreviewed
 ## Same question (q-35qb: Does adding ONE_cath1 ...)
-res-d148  Run 17 ...                           hyp-qc5b refuted     unreviewed
+res-d148  Run 17: run 16 with 10k steps ...     hyp-qc5b refuted     unreviewed
 (+4 more: nb brief res-0kbx --all)
-## Possibly related, not linked
-res-8fe6  Two-state proteins with run 19 ...   shares: run 19, two-state   unreviewed
 ## Conclusions and leads on these results
 (none)
 ```
@@ -506,7 +517,7 @@ res-8fe6  Two-state proteins with run 19 ...   shares: run 19, two-state   unrev
 - results added to those experiments, or with links to the same hypotheses
   and questions, since the node was created;
 - the other conclusions and leads on the same questions and hypotheses;
-- tier 4 of the brief for each cited result (possibly related, not linked).
+- the brief's linked tiers for each cited result.
 
 The **auditor** is a subagent (`agents/nb-auditor.md`) with read-only tools
 (`nb show`, `context`, `brief`, `audit`, `query` and file reads for artifacts).
@@ -518,7 +529,7 @@ It is given only the bundle, never the conversation, and it checks:
 | rule-faithful | Do claims about hypotheses match the verdicts and the frozen rules? For a retrospective experiment, was the rule plausibly not fitted to the result? |
 | scoped | Is the claim no broader than the data (`scope`)? |
 | one claim | Is it one claim? |
-| complete | Are uncited results of the same experiments, unlinked possibly related results, invalidated results and deviations accounted for? |
+| complete | Are uncited results of the same experiments, invalidated results and deviations accounted for? Searching the notebook itself (`nb query --text`), is there a relevant result the node ignores because it is not linked? Report it as a missing link. |
 | consistent | Does it contradict a supported conclusion or a later result? |
 | alternatives | Are obvious alternatives missing from `alternatives`? |
 | faithful | For `origin: user`: does the draft add, drop or shift anything relative to `user_words`? |
@@ -624,7 +635,6 @@ Stored in `meta.json`, read with `nb config get [key]`, changed with
 | `audit_before_confirm` | true | A Claude-authored conclusion or lead needs an up-to-date audit before `nb confirm`. |
 | `auditor_model` | `sonnet` | Model the auditor subagent runs on. |
 | `brief_tier_limit` | 8 | Items per brief tier before "(+N more)". |
-| `brief_related_limit` | 5 | Items in the brief's "possibly related, not linked" tier. |
 
 ## Prime
 
@@ -733,8 +743,9 @@ Phase 2:
   call that mentions neither exits in about 30 ms). It scans the command
   text for `nb` invoked by name or path followed by a gated verb, and
   returns `permissionDecision: "ask"`. The reason shown to the user names the
-  node and what approving it means: for `freeze`, the title, predictions and
-  decision rules; for `confirm`, the claim, scope, confidence and who
+  node and what approving it means: for `freeze`, the title, predictions,
+  decision rules, and what the design builds on, by name ("variant of run 18;
+  uses run 19's outputs", or "fresh"); for `confirm`, the claim, scope, confidence and who
   proposed it. It also asks for any command that unsets or overrides
   `CLAUDECODE`. A false match (the verb inside a quoted string) only costs an
   extra prompt. Everything else passes through with no output.
@@ -762,8 +773,8 @@ Phase 2:
   without asking.
 - **Design skill (phase 4)**, with `nb check <exp>` (structural checks on a
   draft design: path to goal, redundancy, contradicting conclusions, ignored
-  leads, `kt check` on relied-on concepts). `nb similar` is replaced by the
-  brief's "possibly related" tier, reused with an experiment as the anchor.
+  leads, `kt check` on relied-on concepts). There is no `nb similar`: related
+  work is found through links, and the auditor searches for missing ones.
 - `source` nodes holding a citation key that must resolve in Zotero.
 
 ## Deliberately not decided yet
@@ -772,5 +783,3 @@ Phase 2:
 - Whether `prime` should rank open questions by activity instead of recency.
 - Whether verdicts on a hypothesis tested by several experiments should
   combine into something other than "most recent wins".
-- Whether the brief's "possibly related" matching needs more than tags and
-  title tokens (spec text, metric names).
