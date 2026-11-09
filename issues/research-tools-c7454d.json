@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-c7454d",
+  "title": "nb-auditor: Bash is unrestricted and auditor_model is not wired to the agent",
+  "body": "Found in the spec-vs-code review of branch `worktree-agent-af4147e78b41b3bce` on 2026-11-09. Line numbers are that branch.\n\nSPEC (Audit): the auditor is a subagent with read-only tools, and its model is `auditor_model`.\n\n- `agents/nb-auditor.md` line 4 declares `tools: Bash, Read, Grep, Glob`. The limit to nb read commands is prose only.\n- Line 5 hard-codes `model: sonnet`. The config value takes effect only if the calling Claude follows the skill or `/nb-audit` instruction to pass it. `nb config get` is not in the skill's `allowed-tools`.\n\nNot verified: whether an arbitrary `auditor_model` string is usable as the Agent tool's model.",
+  "type": "bug",
+  "status": "open",
+  "priority": 2,
+  "labels": [
+    "lab-notebook"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-11-09T22:24:13.910171373Z",
+  "updated_at": "2026-11-09T22:24:13.910171373Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "9d60a12",
+      "branch": "worktree-agent-af4147e78b41b3bce"
+    },
+    "closed": null
+  }
+}
