@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-788912",
+  "title": "nb: an exploration can be marked done on an interim-only or invalidated-only result",
+  "body": "Found in the spec-vs-code review of branch `worktree-agent-af4147e78b41b3bce` on 2026-11-09. Line numbers are that branch.\n\nSPEC: an interim result \"does not close anything\"; an exploration becomes `done` once it has at least one result.\n\n`cmd_status` (`bin/nb` line 1249) checks only that a `produces` link exists. Reproduced by two reviewers: `nb result <xpl> partial --interim` then `nb status <xpl> done` succeeds; so does an exploration whose only result is invalidated. The spec is silent on the invalidated case. No test covers either.",
+  "type": "bug",
+  "status": "open",
+  "priority": 2,
+  "labels": [
+    "lab-notebook"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-11-09T22:24:13.797261906Z",
+  "updated_at": "2026-11-09T22:24:13.797261906Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "9d60a12",
+      "branch": "worktree-agent-af4147e78b41b3bce"
+    },
+    "closed": null
+  }
+}
