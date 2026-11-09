@@ -13,7 +13,7 @@
   "lease_expires": "2026-11-09T21:16:39.502902675Z",
   "defer_until": null,
   "created_at": "2026-11-09T16:39:02.831187169Z",
-  "updated_at": "2026-11-09T21:01:39.502902675Z",
+  "updated_at": "2026-11-09T21:01:39.544311874Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
@@ -104,6 +104,14 @@
       "author": "Dylan Wichman/7dfeebce",
       "text": "SPEC draft written 2026-11-09 (uncommitted, on nb-dev): plugins/lab-notebook/SPEC.md, new section \"Closing the loop\". Skill draft at plugins/lab-notebook/drafts/SKILL.md; the live SKILL.md is untouched because sessions may load it from the working tree. Awaiting user review before any code.",
       "commit": "441948a",
+      "branch": "nb-dev"
+    },
+    {
+      "id": "a0f0390e",
+      "at": "2026-11-09T21:01:39.544307857Z",
+      "author": "Dylan Wichman/7dfeebce",
+      "text": "SPEC reviewed by a fresh agent and revised 2026-11-09; committed as 16cdada. Fixes: durable reviews field (written at confirm, at user add and by nothing-yet); verdicts made an append-only history, added to the post-freeze mutable list and to sync; derived hypothesis status by most recent event; reruns of a done experiment become a new variant-of experiment; exploration done stays manual; interim-only work warns; audit freshness rule; latest audit counts; atomic --verdict; migration note. Implementation delegated to a worktree agent; not merged into nb-dev yet.",
+      "commit": "16cdada",
       "branch": "nb-dev"
     }
   ],
