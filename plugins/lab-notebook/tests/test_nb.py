@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -93,6 +94,9 @@ class NbCase(unittest.TestCase):
     def add(self, typ, title, *args, **kw):
         if typ in ("conclusion", "lead") and kw.get("author") == "claude" and "--origin" not in args:
             args += ("--origin", "claude")  # required for Claude's drafts; the origin tests pass it explicitly
+        if typ in ("experiment", "exploration") and "--fresh" not in args \
+                and not any(str(a).startswith(("variant-of:", "uses:")) for a in args):
+            args += ("--fresh",)  # freezing needs builds-on; TestBuildsOn adds designs without it via ok("add", ...)
         return self.ok("add", typ, title, *args, **kw).split()[-1]
 
     def audit(self, nid, verdict="sound", findings="none", **kw):
@@ -1410,8 +1414,7 @@ class TestConfig(NbCase):
         self.assertEqual(json.loads(self.ok("config", "get", "--json")),
                          {"prime_max_chars": 4000, "prime_section_limit": 5, "pending_days": 7, "drift_leads": 2,
                           "min_results_supported": 1, "run_patterns": [], "freeze_gate": False,
-                          "audit_before_confirm": True, "auditor_model": "sonnet", "brief_tier_limit": 8,
-                          "brief_related_limit": 5})
+                          "audit_before_confirm": True, "auditor_model": "sonnet", "brief_tier_limit": 8})
         self.assertEqual(json.loads(self.ok("config", "get", "pending_days", "--json")), {"pending_days": 7})
         self.assertIn("pending_days = 7", self.ok("config", "get", "pending_days"))
 
@@ -1734,6 +1737,7 @@ class TestVerdicts(SnapCase):
         self.assertEqual(self.show(d["h"])["status"], "refuted")
         e = self.show(d["e"])
         self.assertEqual(e["status"], "done")
+        self.assertRegex(e["verdicts"][0].pop("at"), r"^%sT\d\d:\d\d:\d\dZ$" % TODAY)
         self.assertEqual(e["verdicts"], [{"hypothesis": d["h"], "verdict": "refuted", "result": out,
                                           "basis": "m 0.1 < 0.5", "date": TODAY, "author": "user"}])
         self.assertEqual(self.lint_msgs()[0], 0)
@@ -1867,6 +1871,122 @@ class TestVerdicts(SnapCase):
         self.ok("verdict", r, d["h"], "refuted", "--basis", "b")
         self.assertIn("[retro]", [l for l in self.ok("show", e).splitlines() if "refuted on" in l][0])
         self.assertIn("[retro]", self.ok("brief", r).splitlines()[2])
+
+
+class TestEventTime(SnapCase):
+    def two_experiments(self):
+        d = self.d
+        a, _ = self.new_exp(d["h"], result=False, title="EA")
+        b, _ = self.new_exp(d["h"], result=False, title="EB")
+        return sorted([a, b])
+
+    def test_same_date_events_order_by_at_not_experiment_id(self):
+        d = self.d
+        low, high = self.two_experiments()
+        # The later write comes from the experiment with the lower id: the old (date, experiment id)
+        # approximation would have let the earlier verdict win.
+        self.ok("result", high, "first", "--verdict", d["h"], "supported", "b1")
+        time.sleep(1.1)
+        self.ok("result", low, "second", "--verdict", d["h"], "refuted", "b2")
+        self.assertEqual(self.show(d["h"])["status"], "refuted")
+        ats = [self.show(e)["verdicts"][0]["at"] for e in (high, low)]
+        self.assertLess(ats[0], ats[1])
+
+    def test_ordering_follows_at_after_recompute(self):
+        d = self.d
+        low, high = self.two_experiments()
+        rl = self.ok("result", low, "l", "--verdict", d["h"], "refuted", "b")
+        rh = self.ok("result", high, "h", "--verdict", d["h"], "supported", "b")
+        # Hand-set times on the same date: the low experiment's verdict is the later one. The next
+        # write (an older-dated verdict from a third experiment) recomputes the status.
+        def times(n, m):
+            n[low]["verdicts"][0]["at"] = TODAY + "T12:00:02Z"
+            n[high]["verdicts"][0]["at"] = TODAY + "T12:00:01Z"
+        self.edit_ref(times)
+        self.ok("verdict", d["r"], d["h"], "inconclusive", "--basis", "b", today="2026-10-27")  # older date
+        self.assertEqual(self.show(d["h"])["status"], "refuted")
+        self.ok("invalidate", rl, "--reason", "bug")
+        self.assertEqual(self.show(d["h"])["status"], "supported")
+        self.assertTrue(rh)
+
+    def test_entries_without_at_sort_by_date_at_midnight(self):
+        d = self.d
+        low, high = self.two_experiments()
+        self.ok("result", low, "l", "--verdict", d["h"], "refuted", "b", today="2026-10-29")
+        self.edit_ref(lambda n, m: n[low]["verdicts"][0].pop("at"))  # a pre-`at` entry: 2026-10-29T00:00:00Z
+        self.ok("result", high, "h", "--verdict", d["h"], "supported", "b", today="2026-10-28")
+        self.assertEqual(self.show(d["h"])["status"], "refuted")
+        self.assertEqual(self.lint_msgs()[0], 0)
+
+    def test_confirm_also_has_at(self):
+        d = self.d
+        c = self.concl(d["r"], "--link", "supports:" + d["h"], author="claude")
+        self.confirm(c, "--also", d["h"])
+        ev = self.show(d["h"])["log"][-1]
+        self.assertRegex(ev["at"], r"^%sT\d\d:\d\d:\d\dZ$" % TODAY)
+
+
+class TestBuildsOn(SnapCase):
+    def decide(self, *a, **kw):
+        return TestGate.decide(self, *a, **kw)
+
+    def draft(self, *extra, title="Next", typ="experiment"):
+        args = ["add", typ, title, "--spec", "S", "--exec", "command"] + list(extra)
+        if typ == "exploration":
+            args += ["--link", "investigates:" + self.d["q"]]
+        e = self.ok(*args)
+        if typ == "experiment":
+            self.predict(e, self.d["h"])
+        return e
+
+    def test_freeze_needs_variant_of_uses_or_fresh(self):
+        d = self.d
+        e = self.draft()
+        err = self.fails("freeze", e)
+        self.assertIn("builds on", err)
+        self.assertIn("fresh", err)
+        x = self.draft(typ="exploration")
+        self.fails("freeze", x)
+        self.fails("set", e, "fresh", "maybe")
+        self.ok("set", e, "fresh", "true")
+        self.ok("freeze", e)
+        self.fails("set", e, "fresh", "false")  # frozen: no longer settable
+        self.ok("link", x, "uses", d["e"])  # uses an experiment (its outputs)
+        self.ok("freeze", x)
+        v = self.draft("--link", "variant-of:" + d["e"], title="Variant")
+        self.ok("freeze", v)
+        f = self.draft("--fresh", title="Fresh")
+        self.assertIs(self.show(f)["fresh"], True)
+        self.ok("freeze", f)
+        u = self.draft("--link", "uses:" + d["r"], title="Uses a result")
+        self.ok("freeze", u)
+
+    def test_uses_targets(self):
+        d = self.d
+        e = self.draft()
+        for target in (d["e"], d["r"]):
+            self.ok("link", e, "uses", target)
+        x = self.draft(typ="exploration")
+        self.ok("link", e, "uses", x)
+        self.fails("link", e, "uses", d["h"])
+        self.fails("link", e, "uses", d["q"])
+
+    def test_old_frozen_nodes_not_rechecked(self):
+        d = self.d
+        self.edit_ref(lambda n, m: n[d["e"]].pop("fresh"))  # the snapshot experiment, frozen before the rule
+        self.assertEqual(self.lint_msgs()[0], 0)
+        self.ok("result", d["e"], "still takes results")
+
+    def test_gate_prompt_names_what_it_builds_on(self):
+        d = self.d
+        v = self.draft("--link", "variant-of:" + d["e"], title="Run 2")
+        self.ok("link", v, "uses", d["r"])
+        reason = TestGate.gate(self, "nb freeze " + v)
+        self.assertIn("builds on: variant of Exp (%s); uses summary of facts (%s)" % (d["e"], d["r"]), reason)
+        f = self.draft("--fresh", title="Fresh one")
+        self.assertIn("fresh", TestGate.gate(self, "nb freeze " + f))
+        n = self.draft(title="Nothing")
+        self.assertIn("nothing stated", TestGate.gate(self, "nb freeze " + n))
 
 
 class TestReview(SnapCase):
@@ -2077,6 +2197,11 @@ class TestBrief(SnapCase):
                           "--link", "investigates:" + b["q2"], "--link", "uses:" + d["r"])
         self.ok("freeze", b["x"])
         b["rx"] = self.ok("result", b["x"], "Exploration finding", today="2026-10-29")
+        # uses an experiment's outputs (its checkpoint), not a result of it
+        b["x2"] = self.add("exploration", "Two-state check of the run 1 checkpoint", "--spec", "S", "--exec", "analysis",
+                           "--link", "investigates:" + b["q2"], "--link", "uses:" + d["e"])
+        self.ok("freeze", b["x2"])
+        b["rx2"] = self.ok("result", b["x2"], "Frozen rule: supported: two-state jsd 0.1", today="2026-10-31")
         b["h2"] = self.add("hypothesis", "H2", "--prediction", "p", "--link", "addresses:" + d["q"])
         b["e4"] = self.add("experiment", "Sibling", "--spec", "S", "--exec", "command")
         self.predict(b["e4"], b["h2"])
@@ -2101,39 +2226,52 @@ class TestBrief(SnapCase):
         self.ok("nothing-yet", b["r4"])
         data = json.loads(self.ok("brief", d["r"], "--json"))
         tiers = [[it["id"] for it in t["items"]] for t in data["tiers"]]
-        self.assertEqual(tiers[0], [b["r2"], b["r3"], b["rx"]])  # chain order first, then uses
+        self.assertEqual(len(tiers), 2)  # directly linked, same question: no text or tag matching tier
+        self.assertEqual(tiers[0], [b["r2"], b["r3"], b["rx2"], b["rx"]])  # chain order first, then uses, newest first
         self.assertEqual(tiers[1], [b["r8"], b["r4"]])  # same question; invalidated r7 left out
-        self.assertEqual(tiers[2], [b["r6"], b["r5"]])  # two shared tokens rank above one shared tag
-        self.assertNotIn(b["r9"], json.dumps(data))
+        for k in ("r5", "r6", "r9"):  # share a tag or title words with r, but are not linked
+            self.assertNotIn(b[k], json.dumps(data))
         self.assertEqual([x["id"] for x in data["claims"]], [c])
         self.assertEqual([x["id"] for x in data["open_questions"]], [d["q"]])
         text = self.ok("brief", d["r"])
         lines = text.splitlines()
         self.assertTrue(lines[0].startswith("# Brief: %s  summary of facts" % d["r"]))
         line = lambda k: [l for l in lines if l.startswith(k)][0]
+        self.assertIn("Run 2", line(b["r2"]))  # named by the design that produced it, not the result title
+        self.assertNotIn("Run 2 result", line(b["r2"]))
         self.assertIn("%s supported: m 0.9 > 0.5" % d["h"], line(b["r2"]))
         self.assertIn("pending: " + c, line(b["r2"]))
         self.assertIn("unreviewed", line(b["r3"]))
+        self.assertIn("Two-state check of the run 1", line(b["rx2"]))
+        self.assertIn("(exploration)", line(b["rx2"]))
         self.assertIn("reviewed: nothing yet", line(b["r4"]))
         self.assertIn("interim", line(b["r8"]))
-        self.assertIn("shares: villin", line(b["r5"]))
-        self.assertIn("shares: facts, summary", line(b["r6"]))
-        for h in ("## Directly linked", "## Same question (%s: Question?)" % d["q"], "## Possibly related, not linked",
+        for h in ("## Directly linked", "## Same question (%s: Question?)" % d["q"],
                   "## Conclusions and leads on these results", "## Open questions"):
             self.assertIn(h, lines)
+        self.assertNotIn("Possibly related", text)
+
+    def test_uses_an_experiment_is_followed_both_ways(self):
+        d = self.d
+        b = self.build()
+        back = json.loads(self.ok("brief", b["rx2"], "--json"))  # x2 uses e, so e's results are directly linked
+        self.assertIn(d["r"], [it["id"] for it in back["tiers"][0]["items"]])
+        n = self.show(b["x2"])
+        self.assertEqual([(x["rel"], x["id"]) for x in n["builds_on"]], [("uses", d["e"])])
+        self.assertIn("builds on: uses experiment Exp (%s)" % d["e"], self.ok("show", b["x2"]))
 
     def test_caps_and_all_and_determinism(self):
         d = self.d
         b = self.build()
         self.ok("config", "set", "brief_tier_limit", "1")
-        self.ok("config", "set", "brief_related_limit", "1")
+        self.fails("config", "set", "brief_related_limit", "1")  # gone with the matching tier
         text = self.ok("brief", d["r"])
         self.assertEqual(text, self.ok("brief", d["r"]))
-        self.assertEqual(text.count("(+2 more: nb brief %s --all)" % d["r"]), 1)  # tier 2: r2 shown, r3 and rx not
-        self.assertIn("(+1 more: nb brief %s --all)" % d["r"], text)
+        self.assertIn("(+3 more: nb brief %s --all)" % d["r"], text)  # tier 2: r2 shown; r3, rx2, rx not
+        self.assertIn("(+1 more: nb brief %s --all)" % d["r"], text)  # tier 3: r8 shown, r4 not
         everything = self.ok("brief", d["r"], "--all")
         self.assertNotIn("more:", everything)
-        for k in ("r2", "r3", "rx", "r4", "r8", "r5", "r6"):
+        for k in ("r2", "r3", "rx", "rx2", "r4", "r8"):
             self.assertIn(b[k], everything)
 
     def test_interim_and_invalidated_say_so(self):
@@ -2168,7 +2306,13 @@ class TestAuditBundle(SnapCase):
         self.assertEqual([r["id"] for r in b["results_since"]], [late])
         self.assertNotIn(old, json.dumps(b["results_since"]))
         self.assertIn(other, [x["id"] for x in b["other_claims"]])
-        self.assertIn(d["r"], b["possibly_related"])
+        self.assertNotIn("possibly_related", b)
+        tiers = b["linked"][d["r"]]
+        self.assertEqual([t["title"].split(" (")[0] for t in tiers], ["Directly linked", "Same question"])
+        self.assertIn(r2, [it["id"] for it in tiers[0]["items"]])
+        self.assertIn(late, [it["id"] for it in tiers[1]["items"]])
+        self.assertEqual(ex["builds_on"], [])
+        self.assertTrue(ex["fresh"])
         text = self.ok("audit", c)
         self.assertTrue(text.startswith("# Audit bundle: " + c))
         self.assertIn("## Results it rests on", text)

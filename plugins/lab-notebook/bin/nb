@@ -79,7 +79,7 @@ COMMON = {
 }
 RUN_FIELDS = {
     "spec": str, "execution": str, "predictions": list, "spec_hash": str,
-    "frozen_at": str, "deviations": list, "runs": list,
+    "frozen_at": str, "deviations": list, "runs": list, "fresh": bool,
 }
 CLAIM_ORIGIN = {"origin": str, "user_words": str}
 TYPE_FIELDS = {
@@ -109,7 +109,8 @@ ENUMS = {
 VERDICTS = ["supported", "refuted", "inconclusive"]
 VERDICT_STATUS = {"supported": "supported", "refuted": "refuted", "inconclusive": "open"}
 VERDICT_KEYS = {"hypothesis", "verdict", "result", "basis", "date", "author"}
-VERDICT_OPTIONAL = {"replaces", "reason"}
+VERDICT_OPTIONAL = {"replaces", "reason", "at"}  # `at` is written on every new entry; older ones lack it
+AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 REVIEW_KINDS = {"confirmed", "nothing-yet"}
 REVIEW_KEYS = {"date", "author", "kind"}
 REVIEW_OPTIONAL = {"by", "note"}
@@ -138,7 +139,8 @@ EDGES = {
     "audits": ({"audit"}, {"conclusion", "lead"}),
     "supersedes": ({"goal", "hypothesis", "conclusion", "decision"}, SAME),
     "variant-of": ({"experiment", "exploration"}, SAME),
-    "uses": ({"experiment", "exploration"}, {"result"}),
+    # a result it analyses, or an experiment/exploration whose outputs (checkpoint, dataset) it uses
+    "uses": ({"experiment", "exploration"}, {"result", "experiment", "exploration"}),
     "based-on": ({"decision"}, {"result", "conclusion"}),
     "affects": ({"decision"}, {"goal", "question", "hypothesis", "experiment", "exploration"}),
 }
@@ -166,7 +168,6 @@ CONFIG_DEFAULTS = {
     "audit_before_confirm": True,
     "auditor_model": "sonnet",
     "brief_tier_limit": 8,
-    "brief_related_limit": 5,
 }
 
 
@@ -176,6 +177,18 @@ class NbError(Exception):
 
 def today():
     return os.environ.get("NB_TODAY") or datetime.date.today().isoformat()
+
+
+def now_at():
+    """UTC write time, YYYY-MM-DDTHH:MM:SSZ. Under NB_TODAY the date comes from it and the time of
+    day from the clock, so events written in one test still order by when they were written."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return "%sT%s" % (os.environ.get("NB_TODAY") or now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%SZ"))
+
+
+def event_at(entry):
+    """Sort key for a status event: its `at`, or its date at 00:00:00 for entries without one."""
+    return entry.get("at") or "%sT00:00:00Z" % entry.get("date", "")
 
 
 def age_days(date):
@@ -517,10 +530,10 @@ class Graph:
     def hyp_events(self, h):
         """Status events for hypothesis h as (sort key, status, source), oldest first.
 
-        A current verdict from any experiment, and every `confirm --also` recorded in h's log.
-        Notebook order is approximated by (date, kind, position): on the same date a confirm
-        --also counts after a verdict; same-date verdicts from different experiments are ordered
-        by experiment id, then list position.
+        A current verdict from any experiment, and every `confirm --also` recorded in h's log,
+        ordered by `at` (UTC write time; entries without one count as their date at 00:00:00).
+        Ties are broken by position in the verdict list or log; between different lists (same
+        second), a verdict counts before a confirm --also, then by experiment id.
         """
         events = []
         for e in sorted(self.into(h, "tests")):
@@ -529,11 +542,11 @@ class Graph:
             v = self.current_verdicts(e).get(h)
             if v:
                 i = self.nodes[e]["verdicts"].index(v)
-                events.append(((v.get("date", ""), 0, e, i), VERDICT_STATUS.get(v.get("verdict"), "open"),
+                events.append(((event_at(v), 0, e, i), VERDICT_STATUS.get(v.get("verdict"), "open"),
                                "%s %s on %s (%s)" % (v.get("verdict"), h, v.get("result"), e)))
         for i, entry in enumerate(self.nodes[h]["log"]):
             if isinstance(entry, dict) and entry.get("event") == "confirm-also" and entry.get("to"):
-                events.append(((entry.get("date", ""), 1, "", i), entry["to"], entry.get("reason", "confirm --also")))
+                events.append(((event_at(entry), 1, "", i), entry["to"], entry.get("reason", "confirm --also")))
         events.sort(key=lambda x: x[0])
         return events
 
@@ -687,11 +700,11 @@ class Graph:
         n["updated"] = today()
         self.changed()
 
-    def set_status(self, nid, new, event, reason=None):
+    def set_status(self, nid, new, event, reason=None, **extra):
         n = self.nodes[nid]
         old = n["status"]
         n["status"] = new
-        self.touch(n, event, **{"from": old, "to": new, "reason": reason})
+        self.touch(n, event, **dict({"from": old, "to": new, "reason": reason}, **extra))
 
     def establish(self, nid, event):
         """pending (or new) -> established, applying supersessions."""
@@ -820,6 +833,8 @@ def validate(g):
                         e("verdict judged on %s, which this experiment did not produce" % v["result"])
                     elif nodes.get(v["result"], {}).get("interim"):
                         e("verdict judged on interim result %s" % v["result"])
+                    if v.get("at") and not AT_RE.match(str(v["at"])):
+                        e("verdict at %r is not YYYY-MM-DDTHH:MM:SSZ" % v["at"])
                     if v.get("replaces") and not v.get("reason"):
                         e("a replacement verdict needs a reason")
             if st in ("frozen", "done") or n.get("spec_hash"):
@@ -955,8 +970,8 @@ def read_body(value):
 TYPE_FLAGS = {
     "goal": [], "question": [],
     "hypothesis": ["prediction"],
-    "experiment": ["spec", "execution", "retro"],
-    "exploration": ["spec", "execution"],
+    "experiment": ["spec", "execution", "retro", "fresh"],
+    "exploration": ["spec", "execution", "fresh"],
     "conclusion": ["rationale", "scope", "alternatives", "confidence", "from_", "origin", "user_words"],
     "lead": ["rationale", "from_", "origin", "user_words"],
     "decision": ["rationale", "reject", "revisit_if"],
@@ -1056,6 +1071,8 @@ def cmd_add(args):
                           "--user-words) or --origin claude (Claude's read, given because the user asked)" % t)
         if n.get("origin") == "user" and not n["user_words"]:
             raise NbError("--origin user needs --user-words: the user's read, verbatim")
+        if args.fresh:
+            n["fresh"] = True
         if args.retro:
             n["retrospective"] = True
         if args.reject:
@@ -1184,6 +1201,10 @@ def cmd_set(args):
             n[f] = cur
         elif args.append or args.remove:
             raise NbError("--append and --remove are for list fields")
+        elif kind is bool:
+            if value not in ("true", "false"):
+                raise NbError("%s takes true or false" % f)
+            n[f] = value == "true"
         else:
             n[f] = value
         g.touch(n, "set", field=f)
@@ -1250,6 +1271,11 @@ def cmd_freeze(args):
             raise NbError("%s cannot be frozen without %s" % (nid, ", ".join(missing)))
         if not g.has_active_goal(nid):
             raise NbError("%s has no path to an active goal (nb path %s)" % (nid, nid))
+        if not g.out(nid, "variant-of", "uses") and not n.get("fresh"):
+            raise NbError("%s does not say what it builds on: add --link variant-of:<exp> (it changes an earlier "
+                          "design) or uses:<exp, xpl or res> (it uses its outputs or analyses a result) with "
+                          "nb link, or mark it fresh (nb set %s fresh true) if it builds on nothing in the notebook"
+                          % (nid, nid))
         if g.config("freeze_gate"):
             blockers = g.gate_blockers()
             if blockers:
@@ -1378,7 +1404,7 @@ def add_verdict(g, e, rid, hyp, verdict, basis, replace=False, reason=None):
     if replace and not cur:
         raise NbError("%s has no current verdict for %s to replace; drop --replace" % (e, h))
     entry = {"hypothesis": h, "verdict": verdict, "result": rid, "basis": basis.strip(),
-             "date": today(), "author": author()}
+             "date": today(), "at": now_at(), "author": author()}
     if replace:
         entry.update(replaces=True, reason=reason)
     g.nodes[e]["verdicts"].append(entry)
@@ -1458,7 +1484,7 @@ def cmd_confirm(args):
             # status event that later recomputes count (see hyp_events). It is logged even when
             # the status does not change.
             changes.append("%s %s -> %s" % (x, g.status(x), new) if g.status(x) != new else "%s stays %s" % (x, new))
-            g.set_status(x, new, "confirm-also", reason="by %s" % nid)
+            g.set_status(x, new, "confirm-also", reason="by %s" % nid, at=now_at())
         return nid, n["status"], changes
 
     nid, status, changes = write(lambda r: "nb: confirm %s" % r[0], apply)
@@ -1554,6 +1580,8 @@ def cmd_show(args):
     if t == "experiment":
         extra["current_verdicts"] = g.current_verdicts(nid)
         extra["missing_verdicts"] = g.missing_verdicts(nid)
+    if t in ("experiment", "exploration"):
+        extra["builds_on"] = builds_on(g, nid)
     if t in ("conclusion", "lead"):
         a = g.latest_audit(nid)
         if a:
@@ -1570,7 +1598,7 @@ def cmd_show(args):
     if n.get("origin"):
         lines.append("origin: %s" % ("the user's read" if n["origin"] == "user" else "Claude's read, asked for by the user"))
     for k in fields_of(n["type"]):
-        if k in ("id", "type", "title", "author", "created", "updated", "status", "links", "log", "origin") \
+        if k in ("id", "type", "title", "author", "created", "updated", "status", "links", "log", "origin", "fresh") \
                 or not n.get(k):
             continue
         v = n[k]
@@ -1598,6 +1626,8 @@ def cmd_show(args):
             lines.append("%s: %s" % (k, canonical(v)))
         else:
             lines.append("%s: %s" % (k, v))
+    if t in ("experiment", "exploration"):
+        lines.append("builds on: %s" % builds_on_text(extra["builds_on"], n.get("fresh")))
     if t == "result":
         lines.append("review: %s" % extra["review"])
     if t == "experiment" and n.get("status") in ("frozen", "done") and extra["missing_verdicts"]:
@@ -1736,21 +1766,8 @@ def cmd_gate(args):
 
 # ---------------------------------------------------------------- brief ---
 
-STOP = set("""about above after again against also among another because been before being below between both
-could does doing done down during each either even every from further have having here into itself just
-less made make many more most much must near only other over same should since some such than that their
-them then there these they this those through under until upon very were what when where which while whom
-will with within without would your result results run runs using used versus""".split())
-RUN_RE = re.compile(r"\brun[\s_-]*(\d+)\b")
-WORD_RE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
-
-
-def title_tokens(title):
-    t = title.lower()
-    toks = {"run %s" % m for m in RUN_RE.findall(t)}
-    toks |= {w for w in WORD_RE.findall(RUN_RE.sub(" ", t)) if len(w) >= 4 and w not in STOP}
-    return toks
-
+# The brief follows links only; there is no text or tag matching. A result that should appear
+# and does not is a missing link (nb link).
 
 def recent(g, ids):
     return sorted(set(ids), key=lambda k: (g.nodes[k]["created"], k), reverse=True)
@@ -1799,49 +1816,60 @@ def results_under(g, q):
     return [r for p in prods for r in g.out(p, "produces")]
 
 
-def related_unlinked(g, rid, exclude):
-    """Brief tier 4: [(id, shared)] ranked by shared tags and tokens, then recency."""
-    me = g.nodes[rid]
-    tags, toks = set(me.get("tags") or []), title_tokens(me["title"])
-    hits = []
-    for k, n in g.nodes.items():
-        if n["type"] != "result" or k == rid or k in exclude or n.get("status") != "valid":
-            continue
-        st, sk = tags & set(n.get("tags") or []), toks & title_tokens(n["title"])
-        if st or len(sk) >= 2:
-            hits.append((k, sorted(sk) + sorted(st - sk)))
-    hits.sort(key=lambda x: (g.nodes[x[0]]["created"], x[0]), reverse=True)  # recency breaks ties ...
-    hits.sort(key=lambda x: -len(x[1]))  # ... under the shared count (stable sort)
-    return hits
+def builds_on(g, e):
+    """What a design builds on: [{rel, id, type, title}] for its variant-of and uses links."""
+    return [{"rel": l["rel"], "id": l["to"], "type": g.type(l["to"]), "title": g.nodes[l["to"]]["title"]}
+            for l in g.nodes[e]["links"] if l["rel"] in ("variant-of", "uses") and l["to"] in g.nodes]
 
 
-def brief_item(g, k, shares=None):
+def builds_on_text(items, fresh):
+    """'variant of Run 18 (exp-x); uses Run 19 (exp-y)', 'fresh', or a warning."""
+    words = {"variant-of": "variant of", "uses": "uses"}
+    parts = ["%s %s %s (%s)" % (words[b["rel"]], b["type"], short(b["title"], 60), b["id"]) for b in items]
+    if fresh:
+        parts.append("fresh (builds on nothing in the notebook)")
+    return "; ".join(parts) or "nothing stated (nb freeze needs variant-of, uses or fresh)"
+
+
+def uses_linked(g, rid, e):
+    """Results joined to rid by `uses`, either direction, whether the link names a result or the
+    experiment/exploration that produced it."""
+    out = []
+    for x in g.out(e, "uses"):  # what rid's producer uses
+        out += [x] if g.type(x) == "result" else results_of(g, [x])
+    out += results_of(g, g.into(rid, "uses"))  # designs that use this result
+    out += results_of(g, g.into(e, "uses"))  # designs that use rid's producer (its checkpoint, data)
+    return out
+
+
+def brief_item(g, k):
     n = g.nodes[k]
     e = g.producer(k)
     retro = bool(e and g.type(e) == "experiment" and g.nodes[e].get("retrospective"))
     vs = [{"hypothesis": v["hypothesis"], "verdict": v["verdict"], "basis": v["basis"], "retro": retro}
           for v in g.verdicts_on(k) if v["current"]]
-    return {"id": k, "title": n["title"], "producer": e, "status": n.get("status"), "interim": bool(n.get("interim")),
-            "verdicts": vs, "review": g.review_state(k), "shares": shares or []}
+    return {"id": k, "title": n["title"], "producer": e, "producer_type": g.type(e),
+            "producer_title": g.nodes[e]["title"] if e in g.nodes else "", "status": n.get("status"),
+            "interim": bool(n.get("interim")), "verdicts": vs, "review": g.review_state(k)}
 
 
 def brief_line(it):
+    """id, the name of the design that produced it, verdicts, review state."""
     bits = []
     for v in it["verdicts"]:
         bits.append("%s %s: %s%s" % (v["hypothesis"], v["verdict"], short(v["basis"], 40), " [retro]" if v["retro"] else ""))
-    if it["shares"]:
-        bits.append("shares: " + ", ".join(it["shares"]))
-    bits.append(it["review"] if it["review"] in ("interim", "unreviewed") or it["review"].startswith("pending")
-                else it["review"])
+    if not it["verdicts"] and it["producer_type"] == "exploration":
+        bits.append("(exploration)")
+    bits.append(it["review"])
     if it["status"] == "invalidated":
         bits.append("invalidated")
-    return "%-9s %-46s %s" % (it["id"], short(it["title"], 46), "   ".join(bits))
+    return "%-9s %-46s %s" % (it["id"], short(it["producer_title"] or it["title"], 46), "   ".join(bits))
 
 
 def brief_data(g, rid, show_all=False):
     n = g.nodes[rid]
     e = g.producer(rid)
-    tier_cap, rel_cap = g.config("brief_tier_limit"), g.config("brief_related_limit")
+    tier_cap = g.config("brief_tier_limit")
     listed = {rid}
     retro = bool(e and g.nodes[e].get("retrospective"))
     head = {"id": rid, "title": n["title"], "summary": n.get("summary", ""), "status": n.get("status"),
@@ -1849,20 +1877,18 @@ def brief_data(g, rid, show_all=False):
             "producer_status": g.status(e), "retro": retro, "review": g.review_state(rid),
             "verdicts": [dict(v, retro=retro) for v in g.verdicts_on(rid)]}
 
-    def tier(title, ids, cap, shares=None):
+    def tier(title, ids, cap):
         ids = [k for k in ids if k not in listed and g.status(k) == "valid"]
         ids = list(dict.fromkeys(ids))
         listed.update(ids)
         shown = ids if show_all else ids[:cap]
-        return {"title": title, "items": [brief_item(g, k, (shares or {}).get(k)) for k in shown],
-                "more": len(ids) - len(shown)}
+        return {"title": title, "items": [brief_item(g, k) for k in shown], "more": len(ids) - len(shown)}
 
     tiers = []
     chain, linked = [], []
     if e:
         chain = results_of(g, variant_chain(g, e))
-        linked = list(g.out(e, "uses"))
-        linked += results_of(g, [x for x in g.into(rid, "uses")])
+        linked = uses_linked(g, rid, e)
         for h in g.out(e, "tests"):
             linked += results_of(g, [x for x in g.into(h, "tests") if x != e])
     tiers.append(tier("Directly linked", chain + recent(g, [k for k in linked if k not in chain]), tier_cap))
@@ -1870,8 +1896,6 @@ def brief_data(g, rid, show_all=False):
     under = recent(g, [r for q in qs for r in results_under(g, q)])
     qtitle = "Same question" + (" (%s)" % "; ".join("%s: %s" % (q, short(g.nodes[q]["title"], 50)) for q in qs) if qs else "")
     tiers.append(tier(qtitle, under, tier_cap))
-    rel = related_unlinked(g, rid, listed)
-    tiers.append(tier("Possibly related, not linked", [k for k, _ in rel], rel_cap, dict(rel)))
     every = [rid] + [it["id"] for t in tiers for it in t["items"]]
     claims = [c for r in every for c in g.into(r, "derived-from", "suggested-by")
               if g.status(c) in ("pending", "supported", "active", "followed")]
@@ -1958,18 +1982,18 @@ def audit_bundle(g, nid):
     for r in cited:
         others.update(g.into(r, "derived-from", "suggested-by"))
     others = [c for c in recent(g, others) if c != nid and g.type(c) in ("conclusion", "lead")]
-    related = {}
-    for r in cited:
-        related[r] = [{"id": k, "title": g.nodes[k]["title"], "shares": s, "review": g.review_state(k)}
-                      for k, s in related_unlinked(g, r, set(cited))[:g.config("brief_related_limit")]]
+    linked = {}
+    for r in cited:  # the brief's linked tiers (directly linked, same question), uncapped
+        linked[r] = [{"title": t["title"], "items": t["items"]} for t in brief_data(g, r, show_all=True)["tiers"]]
 
     def result(r):
         return dict(bundle_node(g, r), review=g.review_state(r), verdicts_on=g.verdicts_on(r))
 
     def experiment(e):
-        keep = ("id", "type", "title", "status", "retrospective", "spec", "execution", "predictions",
+        keep = ("id", "type", "title", "status", "retrospective", "fresh", "spec", "execution", "predictions",
                 "verdicts", "deviations", "frozen_at", "runs", "body")
         d = {k: v for k, v in bundle_node(g, e).items() if k in keep}
+        d["builds_on"] = builds_on(g, e)
         d["current_verdicts"] = g.current_verdicts(e) if g.type(e) == "experiment" else {}
         return d
 
@@ -1983,7 +2007,7 @@ def audit_bundle(g, nid):
             "uncited_results": [result(r) for r in uncited],
             "results_since": [result(r) for r in since if r not in uncited],
             "other_claims": [claim(c) for c in others],
-            "possibly_related": related}
+            "linked": linked}
 
 
 AUDIT_SECTIONS = [
@@ -1993,7 +2017,8 @@ AUDIT_SECTIONS = [
     ("uncited_results", "Other results of those experiments, not cited"),
     ("results_since", "Results added since the node was created, on the same experiments, hypotheses or questions"),
     ("other_claims", "Other conclusions and leads on the same questions, hypotheses or results"),
-    ("possibly_related", "Possibly related, not linked (brief tier 4 per cited result)"),
+    ("linked", "Linked results per cited result (the brief's tiers: directly linked, same question). Only linked "
+               "work appears here; search the notebook for what is missing"),
 ]
 
 
@@ -2462,6 +2487,8 @@ def build_parser():
     sp.add_argument("--spec", help="experiment/exploration: what will be done ('-' reads stdin)")
     sp.add_argument("--exec", dest="execution", choices=sorted(ENUMS["execution"]))
     sp.add_argument("--retro", action="store_true", help="experiment: spec and predictions written after the results")
+    sp.add_argument("--fresh", action="store_true",
+                    help="experiment/exploration: builds on nothing in the notebook (else link variant-of or uses)")
     sp.add_argument("--rationale", help="conclusion/lead/decision: why ('-' reads stdin)")
     sp.add_argument("--scope", help="conclusion: where the claim holds")
     sp.add_argument("--alternatives", help="conclusion: alternatives ruled out")

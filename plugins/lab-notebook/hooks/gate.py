@@ -55,6 +55,12 @@ def describe(nid, cwd, verb):
                     else "rests on a retrospective experiment")
     for p in n.get("predictions", []):
         bits.append("predicts for %s: %s; rule: %s" % (p["hypothesis"], p["prediction"], p["decision_rule"]))
+    if verb == "freeze" and n["type"] in ("experiment", "exploration"):
+        words = {"variant-of": "variant of", "uses": "uses"}
+        parts = ["%s %s (%s)" % (words.get(b["rel"], b["rel"]), b["title"], b["id"]) for b in n.get("builds_on", [])]
+        if n.get("fresh"):
+            parts.append("fresh: builds on nothing in the notebook")
+        bits.append("builds on: " + ("; ".join(parts) or "nothing stated, so nb will refuse to freeze it"))
     for k in ("scope", "confidence"):
         if n.get(k):
             bits.append("%s: %s" % (k, n[k]))
