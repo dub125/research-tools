@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-cecb1b",
+  "title": "lab-notebook SPEC: internal inconsistencies and undocumented behaviour",
+  "body": "Found in the spec-vs-code review of branch `worktree-agent-af4147e78b41b3bce` on 2026-11-09. Line numbers are that branch.\n\n- `--fresh` is described under Types but missing from the `nb add` flags in the CLI table.\n- `nb set --remove` exists and is tested but is not in the spec.\n- Types says `origin` and `user_words` are both required at creation; the rules section and the code require `user_words` only when the origin is `user`.\n- Tags are changeable on any node, yet results' fields never change and audits are immutable; the code allows tags.\n- The verdict field lists `at` as required; the code makes it optional for older entries.\n- Brief: \"same variant-of chain\" is implemented as the whole connected component, so siblings are included.\n- Lineage in code also follows `addresses` and `refines`, which the definition omits.\n- The audit bundle carries more than the seven listed items although SPEC says \"and nothing else\".\n- `/nb-audit` says \"more recently confirmed\" where SPEC says \"more recent\".\n- The skill and auditor file add rules the spec lacks (leads skip scope and alternatives; show the brief as printed).\n- Writes refuse only new validation errors; SPEC says nb refuses invalid state.",
+  "type": "task",
+  "status": "open",
+  "priority": 3,
+  "labels": [
+    "lab-notebook"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-11-09T22:24:14.24748787Z",
+  "updated_at": "2026-11-09T22:24:14.24748787Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "9d60a12",
+      "branch": "worktree-agent-af4147e78b41b3bce"
+    },
+    "closed": null
+  }
+}
