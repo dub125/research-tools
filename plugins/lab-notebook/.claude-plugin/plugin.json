@@ -1,6 +1,6 @@
 {
   "name": "lab-notebook",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Per-project research record: goals, questions, hypotheses, experiments, results and conclusions as a typed graph on a git ref, with user approval for freezing designs and confirming claims.",
   "author": {
     "name": "Dylan Wichman"
