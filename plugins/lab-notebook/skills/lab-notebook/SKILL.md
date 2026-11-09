@@ -35,10 +35,14 @@ or the run directory, and the notebook stores references to them.
   known: `nb query --text <topic>`, `nb context <question>`, and `nb path` on
   the proposal once drafted. Say if it repeats a done experiment, contradicts
   a supported conclusion, or ignores an active lead.
-- **Link what you build on.** An experiment that changes an earlier one gets
-  `--link variant-of:<earlier>` ("run 18 = run 13 at 30k steps"). An
-  exploration that evaluates a run's output `uses` that run's result. The
-  brief can only show what is linked.
+- **State what a design builds on.** When drafting an experiment or
+  exploration, say what it builds on: `--link variant-of:<exp>` when it
+  changes an earlier design ("run 18 = run 13 at 30k steps"), `--link
+  uses:<exp, xpl or res>` when it uses another's outputs or analyses a result,
+  or `--fresh` when it builds on nothing in the notebook. A two-state-style
+  check of a run's trained model `uses` that run's experiment (its checkpoint),
+  even before the run has results. `nb freeze` refuses a design with none of
+  these. The brief follows links only, so it can only show what is linked.
 - **Don't dump the graph.** `nb prime` already loaded at session start. Pull
   more with `context`, `path`, `query`, `brief` and `show`.
 
@@ -50,7 +54,8 @@ or the run directory, and the notebook stores references to them.
 nb gate                                                         # anything left to close first?
 nb add question "..." --link refines:<goal or question>         # if no question fits
 nb add hypothesis "<claim>" --prediction "<what should be seen>" --link addresses:<q>
-nb add experiment "<title>" --spec "..." --exec command|analysis|manual [--link variant-of:<exp>]
+nb add experiment "<title>" --spec "..." --exec command|analysis|manual \
+    --link variant-of:<exp> | --link uses:<exp, xpl or res> | --fresh   # what it builds on
 nb predict <exp> <hyp> --prediction "..." --metric "..." --rule "supported if ..., refuted if ..., otherwise inconclusive"
 nb path <exp>                                                   # must reach an active goal
 ```
@@ -59,7 +64,7 @@ If `nb gate` lists unreviewed results or missing verdicts, tell the user and
 close those first; `nb freeze` will be refused until then. Then show the user
 the design and the decision rule, and let them freeze it. Data analysis
 without a hypothesis is an `exploration` (`--link investigates:<q>`, no
-predictions).
+predictions, and the same builds-on links or `--fresh`).
 
 **After a run** (the experiment must be frozen):
 

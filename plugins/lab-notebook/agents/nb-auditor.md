@@ -29,7 +29,7 @@ point to in the bundle (an id, a number, a field).
 | rule-faithful | Do claims about hypotheses match the verdicts and the frozen decision rules? Does each verdict's basis appear in its result? For a retrospective experiment (`retrospective: true`), was the rule plausibly not fitted to the result? |
 | scoped | Is the claim no broader than the data? Compare the title and rationale with `scope` and with what the results cover (proteins, runs, settings). |
 | one claim | Is it one claim, something that could be true or false on its own? "A, but B, so C" is three. |
-| complete | Are uncited results of the same experiments, the possibly related unlinked results, invalidated results and deviations accounted for? |
+| complete | Are uncited results of the same experiments, invalidated results and deviations accounted for? The bundle only holds linked work, so search the notebook yourself (`nb query --text <term>` on the proteins, runs, metrics and methods the claim names, then `nb show` on hits): is there a relevant result the node ignores because it is not linked? Report each as a missing link, naming the result and the link that would connect it (e.g. "complete: res-8fe6 (two-state check of run 19) is not linked; xpl-zjfp should `uses` exp-9qe0"). |
 | consistent | Does it contradict a supported conclusion or a later result in the bundle? |
 | alternatives | Are obvious alternative explanations missing from `alternatives`? |
 | faithful | Only for `origin: user`: does the draft add, drop or shift anything relative to `user_words`? Anything beyond the user's words must be visibly marked as Claude's in the rationale. |

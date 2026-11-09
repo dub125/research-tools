@@ -45,7 +45,7 @@ q-qrt0
 $ nb add hypothesis "The ControlNet places samples at the requested committor" \
     --prediction "realized q tracks requested q on the held-out protein" --link addresses:q-qrt0
 hyp-e5f7
-$ nb add experiment "ControlNet run 1 on villin holdout" --spec "..." --exec command
+$ nb add experiment "ControlNet run 1 on villin holdout" --spec "..." --exec command --fresh
 exp-czx5
 $ nb predict exp-czx5 hyp-e5f7 --prediction "rho(q_req, q_real) > 0.5" \
     --metric "Spearman rho over 512 samples per q_req" --rule "supported if rho > 0.5"
@@ -59,6 +59,11 @@ $ nb nothing-yet res-9kdx      # or a conclusion drafted from your read
 $ nb path exp-czx5
 exp-czx5 -> hyp-e5f7 -> q-qrt0 -> goal-ae90  (active)
 ```
+
+A design states what it builds on before it can be frozen: `--link
+variant-of:<exp>` when it changes an earlier one, `--link uses:<exp, xpl or
+res>` when it uses another's outputs (a checkpoint, a dataset) or analyses a
+result, or `--fresh` when it builds on nothing in the notebook.
 
 Commands that create a node (`nb add`, `nb result`, `nb freeze`) print the id
 on stdout and the title on stderr, so `$(nb add ...)` captures just the id.
@@ -80,8 +85,9 @@ A result goes through three steps before the project moves on (SPEC.md,
    replacing one (`--replace --reason`) is yours to approve. Invalidating a
    result withdraws its verdicts and recomputes both statuses.
 2. **Review.** Every result is reviewed with you. Claude shows `nb brief <res>`,
-   a fixed summary of the result and everything linked or possibly related to
-   it, asks for your read and holds its own until you have given yours or
+   a fixed summary of the result and the results linked to it (same
+   variant-of chain, `uses` either way, same hypotheses, same question; links
+   only, no text matching), asks for your read and holds its own until you have given yours or
    asked for it. A conclusion or lead drafted from your words records them
    (`--origin user --user-words`). If there is nothing to conclude yet, you
    run or approve `nb nothing-yet <res>`.
