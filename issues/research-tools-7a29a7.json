@@ -13,7 +13,7 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-11-09T16:39:02.831187169Z",
-  "updated_at": "2026-11-09T16:56:47.349640838Z",
+  "updated_at": "2026-11-09T17:02:55.402839335Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
@@ -47,6 +47,14 @@
       "at": "2026-11-09T16:56:47.349638694Z",
       "author": "Dylan Wichman/7dfeebce",
       "text": "Decided with user 2026-11-09: no length cap on claim titles; instead one claim per conclusion. nb confirm will offer to update the linked hypothesis and question statuses. New complaint: in chat the agent refers to nodes by bare ids (exp-pb59) when asking the user for decisions, and the ids tell the user nothing. The gate prompt already shows type, id and title (gate.py:33), so the problem is chat text plus nb add printing only the id (nb:818).",
+      "commit": "441948a",
+      "branch": "nb-dev"
+    },
+    {
+      "id": "282a5be8",
+      "at": "2026-11-09T17:02:55.402837612Z",
+      "author": "Dylan Wichman/7dfeebce",
+      "text": "Decided with user 2026-11-09: backlog option (a): once the design is settled, an agent drafts one-claim conclusions and leads for the frozen-with-results items and the user triages them. Ids: (1) a skill rule to give the name first, then the id, and never ask a question about a bare id; (2) nb add, result and freeze print the id with its title. No aliases for now. Note: the phase 3 PostToolUse injection text in SPEC (record no conclusions or leads) contradicts this direction and must change.",
       "commit": "441948a",
       "branch": "nb-dev"
     }
