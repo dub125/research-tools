@@ -13,7 +13,7 @@
   "lease_expires": "2026-11-09T21:16:39.502902675Z",
   "defer_until": null,
   "created_at": "2026-11-09T16:39:02.831187169Z",
-  "updated_at": "2026-11-09T21:59:48.987443884Z",
+  "updated_at": "2026-11-09T22:08:39.278110162Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
@@ -127,6 +127,14 @@
       "at": "2026-11-09T21:59:48.987437522Z",
       "author": "Dylan Wichman/7dfeebce",
       "text": "Decided 2026-11-09: no text matching in the brief. It follows links only, and lineage is fixed upstream instead. uses may target an experiment or exploration (its outputs); freeze requires variant-of, uses or an explicit fresh, and the freeze prompt shows them by name; brief lines show the experiment name; the auditor searches for unlinked evidence and reports it as a missing link; verdict and confirm-also events carry a UTC time (at). SPEC commit 8bcd882 on the worktree branch; implementer resumed.",
+      "commit": "16cdada",
+      "branch": "nb-dev"
+    },
+    {
+      "id": "3b9bc824",
+      "at": "2026-11-09T22:08:39.278104821Z",
+      "author": "Dylan Wichman/7dfeebce",
+      "text": "Link-only follow-up implemented on the worktree branch (5335069, 9d60a12): 175 tests pass, validate passes. On the bioemu copy, after nb link xpl-zjfp uses exp-9qe0, the brief for res-0kbx lists res-8fe6 under Directly linked. Branch is 6 commits ahead of nb-dev (16cdada..9d60a12). Not merged; merging puts the new skill live in bioemu sessions.",
       "commit": "16cdada",
       "branch": "nb-dev"
     }
