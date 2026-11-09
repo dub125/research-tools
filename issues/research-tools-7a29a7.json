@@ -13,7 +13,7 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-11-09T16:39:02.831187169Z",
-  "updated_at": "2026-11-09T16:45:32.530051205Z",
+  "updated_at": "2026-11-09T16:52:12.808781364Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
@@ -31,6 +31,14 @@
       "at": "2026-11-09T16:45:32.530049752Z",
       "author": "Dylan Wichman/7dfeebce",
       "text": "User proposal (2026-11-09): block new experiments while earlier ones have no conclusion, except experiments running in parallel. Proposed shape, still open: gate nb freeze rather than nb add; an experiment that has results blocks new freezes until it is closed (done with a conclusion, or done with --no-conclusion and a reason); an experiment with no results yet counts as running in parallel. Undecided: whether explorations are gated too; whether a pending conclusion unblocks or a confirmed one is required; how to handle the backlog (16 experiments and 14 explorations are frozen with results); whether parallel is implicit or a flag.",
+      "commit": "441948a",
+      "branch": "nb-dev"
+    },
+    {
+      "id": "be6c437d",
+      "at": "2026-11-09T16:52:12.808780031Z",
+      "author": "Dylan Wichman/7dfeebce",
+      "text": "Decided with user 2026-11-09: the gate blocks nb freeze, not nb add. Explorations are gated too and close with a lead or a reason. Only a CONFIRMED conclusion or lead unblocks; a pending one does not. Parallel means the experiment has no results yet (implicit, no flag). Still open: how to handle the backlog. Also found: conclusion titles run 261-655 chars and nothing caps them. Confirming a conclusion never moves the status of the hypothesis it supports or the question it answers: all 6 hypotheses and 3 questions with a supported conclusion are still open.",
       "commit": "441948a",
       "branch": "nb-dev"
     }
