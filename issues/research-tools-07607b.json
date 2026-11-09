@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-07607b",
+  "title": "nb lint: drift and stale-interim warnings stop once a design is done",
+  "body": "Found in the spec-vs-code review of branch `worktree-agent-af4147e78b41b3bce` on 2026-11-09. Line numbers are that branch.\n\nSPEC lint table puts no status condition on either row.\n\n- Drift is checked only for `draft` and `frozen` designs (`lint`, `bin/nb` line 2099). Reproduced: the warning disappears after `nb status <xpl> done`, while `nb path` still reports the drift.\n- `stale_interim` (line 626) requires `frozen`, so a done exploration with only an old interim result is not flagged in lint or in prime's Needs closing.\n\nRelated: the issue about explorations going done on an interim-only result.",
+  "type": "bug",
+  "status": "open",
+  "priority": 3,
+  "labels": [
+    "lab-notebook"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-11-09T22:24:13.87371842Z",
+  "updated_at": "2026-11-09T22:24:13.87371842Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "9d60a12",
+      "branch": "worktree-agent-af4147e78b41b3bce"
+    },
+    "closed": null
+  }
+}
