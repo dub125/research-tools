@@ -62,8 +62,11 @@ INITIAL = {"draft", "open", "pending"}
 STATUS_MOVES = {
     "question": {"open": {"answered", "settled", "parked", "abandoned"},
                  "parked": {"open", "abandoned"}, "answered": {"open"}, "settled": {"open"}},
-    "hypothesis": {"open": {"supported", "refuted"}, "supported": {"refuted"}, "refuted": {"supported"}},
-    "experiment": {"draft": {"abandoned"}, "frozen": {"done", "abandoned"}},
+    # A hypothesis's status is derived from verdicts and confirm --also (see Graph.hyp_events); by
+    # hand it can only be retired.
+    "hypothesis": {"open": {"superseded"}, "supported": {"superseded"}, "refuted": {"superseded"}},
+    # An experiment becomes done when every predicted hypothesis has a current verdict.
+    "experiment": {"draft": {"abandoned"}, "frozen": {"abandoned"}},
     "exploration": {"draft": {"abandoned"}, "frozen": {"done", "abandoned"}},
     "conclusion": {"supported": {"refuted"}},
     "lead": {"active": {"followed", "dropped"}, "followed": {"dropped"}},
@@ -78,15 +81,17 @@ RUN_FIELDS = {
     "spec": str, "execution": str, "predictions": list, "spec_hash": str,
     "frozen_at": str, "deviations": list, "runs": list,
 }
+CLAIM_ORIGIN = {"origin": str, "user_words": str}
 TYPE_FIELDS = {
     "goal": {},
     "question": {},
     "hypothesis": {"prediction": str},
-    "experiment": dict({"retrospective": bool}, **RUN_FIELDS),
+    "experiment": dict({"retrospective": bool}, **RUN_FIELDS, verdicts=list),
     "exploration": {k: v for k, v in RUN_FIELDS.items() if k != "predictions"},
-    "result": {"summary": str, "provenance": dict, "metrics": dict},
-    "conclusion": {"rationale": str, "scope": str, "alternatives": str, "confidence": str, "confirmed_at": str},
-    "lead": {"rationale": str},
+    "result": {"summary": str, "provenance": dict, "metrics": dict, "interim": bool, "reviews": list},
+    "conclusion": dict({"rationale": str, "scope": str, "alternatives": str, "confidence": str, "confirmed_at": str},
+                       **CLAIM_ORIGIN),
+    "lead": dict({"rationale": str}, **CLAIM_ORIGIN),
     "decision": {"rationale": str, "rejected": list, "revisit_if": str},
     "audit": {"verdict": str, "findings": str, "auditor": str, "audited_at": str},
 }
@@ -98,12 +103,23 @@ REQUIRED = {
 ENUMS = {
     "author": {"user", "claude"}, "execution": {"command", "analysis", "manual"},
     "confidence": {"low", "medium", "high"}, "verdict": {"sound", "concerns", "unsound"},
+    "origin": {"user", "claude"},
 }
+# Verdicts: an experiment's frozen decision rule applied to one of its results.
+VERDICTS = ["supported", "refuted", "inconclusive"]
+VERDICT_STATUS = {"supported": "supported", "refuted": "refuted", "inconclusive": "open"}
+VERDICT_KEYS = {"hypothesis", "verdict", "result", "basis", "date", "author"}
+VERDICT_OPTIONAL = {"replaces", "reason"}
+REVIEW_KINDS = {"confirmed", "nothing-yet"}
+REVIEW_KEYS = {"date", "author", "kind"}
+REVIEW_OPTIONAL = {"by", "note"}
+# Fields fixed at creation: never changed by nb set, and a sync conflict if the sides differ.
+FIXED_FIELDS = {"interim", "origin", "user_words"}
 PREDICTION_KEYS = ["hypothesis", "prediction", "metric", "decision_rule"]
 SYSTEM_FIELDS = {"id", "type", "author", "created", "updated", "status", "links", "log",
                  "spec_hash", "frozen_at", "deviations", "runs", "predictions", "provenance",
-                 "metrics", "confirmed_at", "audited_at", "retrospective"}
-APPEND_LISTS = {"log", "links", "refs", "tags", "deviations", "runs"}
+                 "metrics", "confirmed_at", "audited_at", "retrospective", "verdicts", "reviews"} | FIXED_FIELDS
+APPEND_LISTS = {"log", "links", "refs", "tags", "deviations", "runs", "verdicts", "reviews"}
 
 SAME = "same"
 EDGES = {
@@ -119,7 +135,7 @@ EDGES = {
     "spawns": ({"lead"}, {"hypothesis", "experiment", "exploration"}),
     "supports": ({"result", "conclusion", "source"}, {"hypothesis", "conclusion"}),
     "contradicts": ({"result", "conclusion", "source"}, {"hypothesis", "conclusion"}),
-    "audits": ({"audit"}, {"conclusion"}),
+    "audits": ({"audit"}, {"conclusion", "lead"}),
     "supersedes": ({"goal", "hypothesis", "conclusion", "decision"}, SAME),
     "variant-of": ({"experiment", "exploration"}, SAME),
     "uses": ({"experiment", "exploration"}, {"result"}),
@@ -146,6 +162,11 @@ CONFIG_DEFAULTS = {
     "drift_leads": 2,
     "min_results_supported": 1,
     "run_patterns": [],
+    "freeze_gate": False,
+    "audit_before_confirm": True,
+    "auditor_model": "sonnet",
+    "brief_tier_limit": 8,
+    "brief_related_limit": 5,
 }
 
 
@@ -155,6 +176,13 @@ class NbError(Exception):
 
 def today():
     return os.environ.get("NB_TODAY") or datetime.date.today().isoformat()
+
+
+def age_days(date):
+    try:
+        return (datetime.date.fromisoformat(today()) - datetime.date.fromisoformat(date)).days
+    except (TypeError, ValueError):
+        return 0
 
 
 def author():
@@ -277,6 +305,7 @@ class Graph:
     def __init__(self, git, head, meta, nodes, blobs):
         self.git, self.head, self.meta, self.nodes, self.blobs = git, head, meta, nodes, blobs
         self._inbound = None
+        self._ranks = None
 
     @classmethod
     def load(cls, git, commit=None, required=True):
@@ -452,6 +481,203 @@ class Graph:
                     out.append(r)
         return out
 
+    # -- verdicts and derived statuses
+
+    def predicted(self, e):
+        return [p["hypothesis"] for p in self.nodes[e].get("predictions") or [] if isinstance(p, dict)]
+
+    def interim(self, rid):
+        return bool(self.nodes[rid].get("interim"))
+
+    def final(self, rid):
+        """A valid, non-interim result: the kind that gets verdicts and reviews."""
+        return self.type(rid) == "result" and self.status(rid) == "valid" and not self.interim(rid)
+
+    def current_verdicts(self, e):
+        """{hypothesis: verdict entry}: the last entry per hypothesis whose result is still valid."""
+        cur = {}
+        for v in self.nodes[e].get("verdicts") or []:
+            if isinstance(v, dict) and self.status(v.get("result")) == "valid":
+                cur[v.get("hypothesis")] = v
+        return cur
+
+    def missing_verdicts(self, e):
+        cur = self.current_verdicts(e)
+        return [h for h in self.predicted(e) if h not in cur]
+
+    def verdicts_on(self, rid):
+        """Verdict entries judged on result rid, with whether each is still current."""
+        e = self.producer(rid)
+        if self.type(e) != "experiment":
+            return []
+        cur = self.current_verdicts(e)
+        return [dict(v, current=cur.get(v["hypothesis"]) is v) for v in self.nodes[e]["verdicts"]
+                if isinstance(v, dict) and v.get("result") == rid]
+
+    def hyp_events(self, h):
+        """Status events for hypothesis h as (sort key, status, source), oldest first.
+
+        A current verdict from any experiment, and every `confirm --also` recorded in h's log.
+        Notebook order is approximated by (date, kind, position): on the same date a confirm
+        --also counts after a verdict; same-date verdicts from different experiments are ordered
+        by experiment id, then list position.
+        """
+        events = []
+        for e in sorted(self.into(h, "tests")):
+            if self.type(e) != "experiment":
+                continue
+            v = self.current_verdicts(e).get(h)
+            if v:
+                i = self.nodes[e]["verdicts"].index(v)
+                events.append(((v.get("date", ""), 0, e, i), VERDICT_STATUS.get(v.get("verdict"), "open"),
+                               "%s %s on %s (%s)" % (v.get("verdict"), h, v.get("result"), e)))
+        for i, entry in enumerate(self.nodes[h]["log"]):
+            if isinstance(entry, dict) and entry.get("event") == "confirm-also" and entry.get("to"):
+                events.append(((entry.get("date", ""), 1, "", i), entry["to"], entry.get("reason", "confirm --also")))
+        events.sort(key=lambda x: x[0])
+        return events
+
+    def derive_hyp(self, h):
+        """The derived status, or None for a hypothesis with no status events (left as it is)."""
+        if self.status(h) == "superseded":
+            return "superseded"
+        ev = self.hyp_events(h)
+        return ev[-1][1] if ev else None
+
+    def recompute(self, hyps=(), exps=(), event="verdict", reopen=False, force=False):
+        """Bring derived statuses up to date; returns change lines ('hyp-x open -> refuted').
+
+        hyps: hypotheses whose events changed (no events left -> open when force).
+        exps: experiments to check for done; with reopen, a done one missing a verdict goes back
+        to frozen.
+        """
+        changes = []
+        for h in sorted(set(hyps)):
+            if h not in self.nodes or self.status(h) == "superseded":
+                continue
+            ev = self.hyp_events(h)
+            new = ev[-1][1] if ev else ("open" if force else None)
+            if new and new != self.status(h):
+                changes.append("%s %s -> %s" % (h, self.status(h), new))
+                self.set_status(h, new, event, reason=ev[-1][2] if ev else "no current verdict")
+        for e in sorted(set(exps)):
+            if self.type(e) != "experiment":
+                continue
+            st, missing = self.status(e), self.missing_verdicts(e)
+            if st == "frozen" and self.predicted(e) and not missing:
+                changes.append("%s frozen -> done" % e)
+                self.set_status(e, "done", event, reason="every predicted hypothesis has a verdict")
+            elif st == "done" and reopen and missing and self.nodes[e].get("verdicts"):
+                changes.append("%s done -> frozen" % e)
+                self.set_status(e, "frozen", event, reason="no current verdict for %s" % ", ".join(missing))
+        return changes
+
+    # -- review
+
+    def review_state(self, rid):
+        """'interim', 'unreviewed', 'pending: <id>', 'nothing yet' or 'reviewed: <id>'."""
+        n = self.nodes[rid]
+        if n.get("interim"):
+            return "interim"
+        reviews = [r for r in n.get("reviews") or [] if isinstance(r, dict)]
+        if reviews:
+            last = reviews[-1]
+            return "reviewed: nothing yet" if last.get("kind") == "nothing-yet" else "reviewed: %s" % last.get("by", "?")
+        drafts = sorted(c for c in self.into(rid, "derived-from", "suggested-by") if self.status(c) == "pending")
+        return "pending: %s" % ", ".join(drafts) if drafts else "unreviewed"
+
+    def unreviewed(self):
+        return sorted((k for k, n in self.nodes.items() if self.final(k) and not n.get("reviews")),
+                      key=lambda k: (self.nodes[k]["created"], k))
+
+    def add_review(self, rid, kind, by=None, note=None):
+        entry = {"date": today(), "author": author(), "kind": kind}
+        if by:
+            entry["by"] = by
+        if note:
+            entry["note"] = note
+        self.nodes[rid]["reviews"].append(entry)
+        self.touch(self.nodes[rid], "review", to=kind if not by else "%s %s" % (kind, by))
+
+    # -- closing the loop
+
+    def verdicts_missing(self):
+        """Frozen experiments with a final result and a predicted hypothesis without a current verdict."""
+        out = []
+        for k, n in self.nodes.items():
+            if n["type"] == "experiment" and n.get("status") == "frozen" and self.missing_verdicts(k) \
+                    and any(self.final(r) for r in self.out(k, "produces")):
+                out.append(k)
+        return sorted(out, key=lambda k: (self.nodes[k]["created"], k))
+
+    def stale_interim(self):
+        """Frozen experiments/explorations whose only results are interim, the newest older than pending_days."""
+        out = []
+        for k, n in self.nodes.items():
+            if n["type"] not in ("experiment", "exploration") or n.get("status") != "frozen":
+                continue
+            res = [r for r in self.out(k, "produces") if self.status(r) == "valid"]
+            if res and all(self.interim(r) for r in res):
+                newest = max(self.nodes[r]["created"] for r in res)
+                if age_days(newest) > self.config("pending_days"):
+                    out.append(k)
+        return sorted(out, key=lambda k: (self.nodes[k]["created"], k))
+
+    def gate_blockers(self):
+        """[(id, why)] that block nb freeze while freeze_gate is on."""
+        out = []
+        for e in self.verdicts_missing():
+            out.append((e, "result in, no verdict for %s" % ", ".join(self.missing_verdicts(e))))
+        for r in self.unreviewed():
+            out.append((r, "result not reviewed (%s)" % self.review_state(r)))
+        return out
+
+    def follow_ons(self, cid):
+        """[(id, new status)] that `nb confirm <cid> --also` may apply."""
+        if self.type(cid) != "conclusion":
+            return []
+        out = [(h, "supported") for h in self.out(cid, "supports") if self.type(h) == "hypothesis"]
+        out += [(h, "refuted") for h in self.out(cid, "contradicts") if self.type(h) == "hypothesis"]
+        out = [(h, s) for h, s in out if self.status(h) != "superseded"]
+        out += [(q, "answered") for q in self.out(cid, "answers") if self.status(q) == "open"]
+        return out
+
+    # -- audits
+
+    def commit_rank(self, sha):
+        """Position of a notebook commit in history (higher is newer); -1 if unknown."""
+        if self._ranks is None:
+            self._ranks = {}
+            if self.head:
+                out = self.git.run("rev-list", "--topo-order", self.head, check=False).stdout.split()
+                self._ranks = {c: len(out) - i for i, c in enumerate(out)}
+        return self._ranks.get(sha, -1)
+
+    def audits_of(self, nid):
+        """Audits of nid, oldest first (by the notebook version each was made at)."""
+        return sorted(self.into(nid, "audits"),
+                      key=lambda a: (self.commit_rank(self.nodes[a].get("audited_at", "")), self.nodes[a]["created"], a))
+
+    def latest_audit(self, nid):
+        a = self.audits_of(nid)
+        return a[-1] if a else None
+
+    def audit_changes(self, aid, nid):
+        """Fields of nid changed since audit aid was made (tags, refs, log and updated excepted).
+        None if the audited version cannot be found."""
+        sha = self.nodes[aid].get("audited_at")
+        if not sha:
+            return None
+        res = self.git.run("cat-file", "blob", "%s:nodes/%s.json" % (sha, nid), check=False)
+        if res.returncode != 0:
+            return None
+        then, now = json.loads(res.stdout), json.loads(serialise(self.nodes[nid]))
+        skip = {"tags", "refs", "log", "updated"}
+        return sorted(k for k in set(then) | set(now) if k not in skip and then.get(k) != now.get(k))
+
+    def audit_current(self, aid, nid):
+        return self.audit_changes(aid, nid) == []
+
     # -- writing helpers
 
     def touch(self, n, event, **kw):
@@ -479,6 +705,11 @@ class Graph:
         for old in self.out(nid, "supersedes"):
             if self.status(old) != "superseded":
                 self.set_status(old, "superseded", "superseded", reason="by %s" % nid)
+        if t in ("conclusion", "lead"):
+            # Establishing a claim reviews every result it rests on (SPEC: Review).
+            for r in self.out(nid, "derived-from", "suggested-by"):
+                if self.type(r) == "result":
+                    self.add_review(r, "confirmed", by=nid)
 
     def add_link(self, nid, rel, to):
         n = self.nodes[nid]
@@ -573,6 +804,24 @@ def validate(g):
                 th = sorted(l["to"] for l in n.get("links") or [] if isinstance(l, dict) and l.get("rel") == "tests")
                 if ph != th:
                     e("predictions and tests links disagree")
+            if t == "experiment":
+                produced = set(l["to"] for l in n.get("links") or [] if isinstance(l, dict) and l.get("rel") == "produces")
+                for v in n.get("verdicts") or []:
+                    if not isinstance(v, dict) or not VERDICT_KEYS <= set(v) or set(v) - VERDICT_KEYS - VERDICT_OPTIONAL \
+                            or not all(v.get(k) for k in VERDICT_KEYS):
+                        e("verdicts need the keys %s (and optionally %s)"
+                          % (", ".join(sorted(VERDICT_KEYS)), ", ".join(sorted(VERDICT_OPTIONAL))))
+                        break
+                    if v["verdict"] not in VERDICTS:
+                        e("verdict %r is not one of %s" % (v["verdict"], ", ".join(VERDICTS)))
+                    if v["hypothesis"] not in ph:
+                        e("verdict for %s, which this experiment does not predict" % v["hypothesis"])
+                    if v["result"] not in produced:
+                        e("verdict judged on %s, which this experiment did not produce" % v["result"])
+                    elif nodes.get(v["result"], {}).get("interim"):
+                        e("verdict judged on interim result %s" % v["result"])
+                    if v.get("replaces") and not v.get("reason"):
+                        e("a replacement verdict needs a reason")
             if st in ("frozen", "done") or n.get("spec_hash"):
                 if not n.get("spec_hash"):
                     e("%s but never frozen" % st)
@@ -584,6 +833,12 @@ def validate(g):
                 e("must be produced by exactly one experiment or exploration (has %d)" % len(prods))
             elif nodes[prods[0]].get("status") == "draft":
                 e("produced by %s, which was never frozen" % prods[0])
+            for rv in n.get("reviews") or []:
+                if not isinstance(rv, dict) or not REVIEW_KEYS <= set(rv) or set(rv) - REVIEW_KEYS - REVIEW_OPTIONAL \
+                        or rv.get("kind") not in REVIEW_KINDS or (rv.get("kind") == "confirmed" and not rv.get("by")):
+                    e("reviews need date, author and kind (%s); a confirmed review needs by"
+                      % ", ".join(sorted(REVIEW_KINDS)))
+                    break
         if t == "conclusion" and n.get("links") and not g.experiment_basis(nid, valid_only=False):
             e("derives only from exploration results; exploration results can only suggest leads")
     for rel in ACYCLIC:
@@ -680,10 +935,15 @@ def row(g, nid, width=90):
     return "%-10s %-11s %-11s %s%s" % (nid, n["type"], n.get("status") or n.get("verdict", ""), short(n["title"], width), marks)
 
 
-def brief(g, nid):
+def node_brief(g, nid):
     n = g.nodes[nid]
     return {"id": nid, "type": n["type"], "status": n.get("status", ""), "title": n["title"],
             "author": n["author"], "created": n["created"]}
+
+
+def say(line):
+    """Human-readable detail on stderr, so stdout stays just the id for $(nb ...)."""
+    print(line, file=sys.stderr)
 
 
 def read_body(value):
@@ -697,8 +957,8 @@ TYPE_FLAGS = {
     "hypothesis": ["prediction"],
     "experiment": ["spec", "execution", "retro"],
     "exploration": ["spec", "execution"],
-    "conclusion": ["rationale", "scope", "alternatives", "confidence", "from_"],
-    "lead": ["rationale", "from_"],
+    "conclusion": ["rationale", "scope", "alternatives", "confidence", "from_", "origin", "user_words"],
+    "lead": ["rationale", "from_", "origin", "user_words"],
     "decision": ["rationale", "reject", "revisit_if"],
     "audit": ["of", "verdict", "findings", "auditor"],
 }
@@ -788,9 +1048,14 @@ def cmd_add(args):
         else:
             n["status"] = STATUSES[t][0]
         for f in ("prediction", "spec", "execution", "rationale", "scope", "alternatives",
-                  "confidence", "verdict", "findings", "auditor", "revisit_if"):
+                  "confidence", "verdict", "findings", "auditor", "revisit_if", "origin", "user_words"):
             if getattr(args, f, None):
-                n[f] = read_body(getattr(args, f)) if f in ("spec", "rationale") else getattr(args, f)
+                n[f] = read_body(getattr(args, f)) if f in ("spec", "rationale", "user_words") else getattr(args, f)
+        if t in ("conclusion", "lead") and who == "claude" and not n["origin"]:
+            raise NbError("a %s drafted by Claude needs --origin user (drafted from the user's read, with "
+                          "--user-words) or --origin claude (Claude's read, given because the user asked)" % t)
+        if n.get("origin") == "user" and not n["user_words"]:
+            raise NbError("--origin user needs --user-words: the user's read, verbatim")
         if args.retro:
             n["retrospective"] = True
         if args.reject:
@@ -804,7 +1069,7 @@ def cmd_add(args):
         for r in args.from_ or []:
             g.add_link(nid, "derived-from" if t == "conclusion" else "suggested-by", g.resolve(r))
         if args.of:
-            g.add_link(nid, "audits", g.resolve(args.of, {"conclusion"}))
+            g.add_link(nid, "audits", g.resolve(args.of, {"conclusion", "lead"}))
             n["audited_at"] = g.head or ""
             n["auditor"] = n["auditor"] or who
         if t == "conclusion":
@@ -816,6 +1081,7 @@ def cmd_add(args):
 
     nid = write(lambda nid: "nb: add %s" % nid, apply)
     print(nid)
+    say("added %s %s: %s" % (t, nid, args.title.strip()))
 
 
 def cmd_predict(args):
@@ -930,7 +1196,7 @@ def reason_required(t, cur, new):
     return (new in ("abandoned", "parked", "dropped", "rejected")
             or (t == "conclusion" and new == "refuted")
             or (t == "question" and new == "open")
-            or (t == "hypothesis" and cur in ("supported", "refuted")))
+            or (t == "hypothesis" and new == "superseded"))
 
 
 def cmd_status(args):
@@ -946,14 +1212,15 @@ def cmd_status(args):
                 hint = "nb confirm or nb reject"
             elif t == "result":
                 hint = "nb invalidate"
+            elif t == "hypothesis":
+                hint = "nb result --verdict, nb verdict or nb confirm --also; a hypothesis follows its verdicts"
+            elif t == "experiment" and new == "done":
+                hint = "nb result --verdict or nb verdict; an experiment is done once every predicted hypothesis has one"
             raise NbError("%s cannot go from %s to %s with nb status%s"
                           % (nid, cur, new, " (use %s)" % hint if hint else ""))
         if reason_required(t, cur, new) and not args.reason:
             raise NbError("moving %s to %s needs --reason" % (nid, new))
         backers = lambda rel, ty, st: [c for c in g.into(nid, rel) if g.type(c) == ty and g.status(c) == st]
-        if t == "hypothesis" and not backers("supports" if new == "supported" else "contradicts", "conclusion", "supported"):
-            raise NbError("%s can be %s only when a supported conclusion %s it"
-                          % (nid, new, "supports" if new == "supported" else "contradicts"))
         if t == "question" and new == "answered" and not backers("answers", "conclusion", "supported"):
             raise NbError("%s can be answered only when a supported conclusion answers it" % nid)
         if t == "question" and new == "settled" and not backers("affects", "decision", "active"):
@@ -983,12 +1250,23 @@ def cmd_freeze(args):
             raise NbError("%s cannot be frozen without %s" % (nid, ", ".join(missing)))
         if not g.has_active_goal(nid):
             raise NbError("%s has no path to an active goal (nb path %s)" % (nid, nid))
+        if g.config("freeze_gate"):
+            blockers = g.gate_blockers()
+            if blockers:
+                raise NbError("the freeze gate is closed; close these first (nb gate):\n  "
+                              + "\n  ".join(gate_line(g, k, why) for k, why in blockers))
         n["spec_hash"] = spec_hash(n)
         n["frozen_at"] = g.head or ""
         g.set_status(nid, "frozen", "freeze")
-        return nid
+        return nid, n["title"]
 
-    print("frozen %s" % write(lambda nid: "nb: freeze %s" % nid, apply))
+    nid, title = write(lambda r: "nb: freeze %s" % r[0], apply)
+    print(nid)
+    say("frozen %s: %s" % (nid, title))
+
+
+def gate_line(g, k, why):
+    return "%-10s %s   %s" % (k, short(g.nodes[k]["title"], 60), why)
 
 
 def cmd_deviate(args):
@@ -1044,12 +1322,18 @@ def cmd_result(args):
     def apply(g):
         e = g.resolve(args.experiment, {"experiment", "exploration"})
         if g.status(e) != "frozen":
-            raise NbError("%s is %s; results attach only to a frozen experiment or exploration" % (e, g.status(e)))
+            raise NbError("%s is %s; results attach only to a frozen experiment or exploration%s"
+                          % (e, g.status(e), " (a rerun is a new experiment, --link variant-of:%s)" % e
+                             if g.status(e) == "done" else ""))
+        if args.verdict and args.interim:
+            raise NbError("an interim result carries no verdicts; record them with the final result")
+        if args.verdict and g.type(e) != "experiment":
+            raise NbError("%s is an exploration; explorations have no verdicts" % e)
         rid = g.new_id("result")
         n = {k: default(kind) for k, kind in fields_of("result").items()}
         n.update(id=rid, type="result", title=short(args.summary, 100), summary=args.summary,
                  author=author(), created=today(), updated=today(), status="valid",
-                 provenance=prov, metrics=metrics or {}, tags=args.tag or [])
+                 provenance=prov, metrics=metrics or {}, tags=args.tag or [], interim=bool(args.interim))
         g.nodes[rid] = n
         for spec in args.link or []:
             rel, to = parse_link(g, spec)
@@ -1059,9 +1343,87 @@ def cmd_result(args):
         g.touch(n, "add", to="valid")
         g.add_link(e, "produces", rid)
         g.touch(g.nodes[e], "result", to=rid)
-        return rid
+        seen, applied = set(), []
+        for hyp, verdict, basis in args.verdict or []:
+            h = add_verdict(g, e, rid, hyp, verdict, basis)
+            if h in seen:
+                raise NbError("two --verdict for %s in one result" % h)
+            seen.add(h)
+            applied.append("verdict %s %s: %s%s" % (h, verdict, basis, " [retro]" if g.retro(e) else ""))
+        changes = g.recompute(seen, [e]) if seen else []
+        return rid, n["title"], applied, changes
 
-    print(write(lambda rid: "nb: result %s" % rid, apply))
+    rid, title, applied, changes = write(lambda r: "nb: result %s" % r[0], apply)
+    print(rid)
+    say("added result %s: %s" % (rid, title))
+    for line in applied + changes:
+        say(line)
+
+
+def add_verdict(g, e, rid, hyp, verdict, basis, replace=False, reason=None):
+    """Append one verdict entry to experiment e (validated); returns the hypothesis id."""
+    h = g.resolve(hyp, {"hypothesis"})
+    if h not in g.predicted(e):
+        raise NbError("%s does not predict %s; only predicted hypotheses get verdicts (predicted: %s)"
+                      % (e, h, ", ".join(g.predicted(e)) or "none"))
+    if verdict not in VERDICTS:
+        raise NbError("verdict must be one of %s, got %r" % (", ".join(VERDICTS), verdict))
+    if not (basis or "").strip():
+        raise NbError("a verdict needs a basis: the measured value and the bound from the rule")
+    cur = g.current_verdicts(e).get(h)
+    if cur and not replace:
+        raise NbError("%s already has a current verdict for %s (%s on %s); a second verdict is a replacement: "
+                      "nb verdict <res> %s <verdict> --basis B --replace --reason R"
+                      % (e, h, cur["verdict"], cur["result"], h))
+    if replace and not cur:
+        raise NbError("%s has no current verdict for %s to replace; drop --replace" % (e, h))
+    entry = {"hypothesis": h, "verdict": verdict, "result": rid, "basis": basis.strip(),
+             "date": today(), "author": author()}
+    if replace:
+        entry.update(replaces=True, reason=reason)
+    g.nodes[e]["verdicts"].append(entry)
+    g.touch(g.nodes[e], "verdict", to="%s %s" % (h, verdict), reason=reason)
+    return h
+
+
+def cmd_verdict(args):
+    if args.replace and not args.reason:
+        raise NbError("--replace needs --reason: why the frozen rule is applied differently")
+    if args.reason and not args.replace:
+        raise NbError("--reason goes with --replace")
+
+    def apply(g):
+        rid = g.resolve(args.result, {"result"})
+        e = g.producer(rid)
+        if g.type(e) != "experiment":
+            raise NbError("%s was produced by exploration %s; explorations have no verdicts" % (rid, e))
+        if not g.final(rid):
+            raise NbError("%s is %s; verdicts are judged only on valid, non-interim results"
+                          % (rid, "interim" if g.interim(rid) else g.status(rid)))
+        h = add_verdict(g, e, rid, args.hypothesis, args.verdict, args.basis, args.replace, args.reason)
+        return rid, h, e, g.recompute([h], [e])
+
+    rid, h, e, changes = write(lambda r: "nb: verdict %s %s" % (r[0], r[1]), apply)
+    print("verdict %s %s on %s (%s)%s" % (h, args.verdict, rid, e, " replaces the previous one" if args.replace else ""))
+    for line in changes:
+        print(line)
+
+
+def cmd_nothing_yet(args):
+    def apply(g):
+        done = []
+        for term in args.results:
+            rid = g.resolve(term, {"result"})
+            if g.status(rid) != "valid":
+                raise NbError("%s is invalidated; it needs no review" % rid)
+            if g.interim(rid):
+                raise NbError("%s is interim; interim results are not reviewed on their own (the final result is)" % rid)
+            g.add_review(rid, "nothing-yet", note=args.note)
+            done.append(rid)
+        return done
+
+    for rid in write(lambda r: "nb: nothing-yet %s" % " ".join(r), apply):
+        print("reviewed %s: nothing yet" % rid)
 
 
 def cmd_confirm(args):
@@ -1070,10 +1432,39 @@ def cmd_confirm(args):
         n = g.nodes[nid]
         if n.get("status") != "pending":
             raise NbError("%s is %s, not pending" % (nid, n.get("status") or n["type"]))
+        if n["type"] in ("conclusion", "lead") and n["author"] == "claude" and g.config("audit_before_confirm"):
+            a = g.latest_audit(nid)
+            if not a:
+                raise NbError("%s has no audit; run the nb-auditor on `nb audit %s` and record it with "
+                              "nb add audit --of %s (audit_before_confirm is on)" % (nid, nid, nid))
+            changed = g.audit_changes(a, nid)
+            if changed != []:
+                raise NbError("the latest audit of %s (%s) is not current: %s; audit the draft again"
+                              % (nid, a, "changed since: " + ", ".join(changed) if changed
+                                 else "the audited version cannot be found"))
+        offers = dict(g.follow_ons(nid))
+        also = []
+        for term in args.also or []:
+            x = g.resolve(term)
+            if x not in offers:
+                raise NbError("%s is not a follow-on of %s (available: %s)"
+                              % (x, nid, ", ".join("%s %s" % kv for kv in sorted(offers.items())) or "none"))
+            also.append(x)
         g.establish(nid, "confirm")
-        return nid, n["status"]
+        changes = []
+        for x in also:
+            new = offers[x]
+            # The confirm-also log entry is the record of the change and, on a hypothesis, a
+            # status event that later recomputes count (see hyp_events). It is logged even when
+            # the status does not change.
+            changes.append("%s %s -> %s" % (x, g.status(x), new) if g.status(x) != new else "%s stays %s" % (x, new))
+            g.set_status(x, new, "confirm-also", reason="by %s" % nid)
+        return nid, n["status"], changes
 
-    print("confirmed %s (%s)" % write(lambda r: "nb: confirm %s" % r[0], apply))
+    nid, status, changes = write(lambda r: "nb: confirm %s" % r[0], apply)
+    print("confirmed %s (%s)" % (nid, status))
+    for line in changes:
+        print(line)
 
 
 def cmd_reject(args):
@@ -1093,10 +1484,18 @@ def cmd_invalidate(args):
         nid = g.resolve(args.id, {"result"})
         if g.status(nid) != "valid":
             raise NbError("%s is already %s" % (nid, g.status(nid)))
+        withdrawn = [v["hypothesis"] for v in g.verdicts_on(nid)]
         g.set_status(nid, "invalidated", "invalidate", reason=args.reason)
-        return nid
+        changes = []
+        if withdrawn:
+            # Its verdicts stop being current: recompute the hypotheses and the experiment.
+            changes = g.recompute(withdrawn, [g.producer(nid)], event="invalidate", reopen=True, force=True)
+        return nid, changes
 
-    print("invalidated %s" % write(lambda nid: "nb: invalidate %s" % nid, apply))
+    nid, changes = write(lambda r: "nb: invalidate %s" % r[0], apply)
+    print("invalidated %s" % nid)
+    for line in changes:
+        print(line)
 
 
 def cmd_retract(args):
@@ -1130,8 +1529,8 @@ def cmd_config(args):
     except ValueError:
         value = args.value
     want = type(CONFIG_DEFAULTS[args.key])
-    if not isinstance(value, want) or isinstance(value, bool):
-        raise NbError("%s takes a %s" % (args.key, want.__name__))
+    if not isinstance(value, want) or (isinstance(value, bool) and want is not bool):
+        raise NbError("%s takes a %s" % (args.key, {"bool": "true or false"}.get(want.__name__, want.__name__)))
 
     def apply(g):
         g.meta["config"][args.key] = value
@@ -1147,16 +1546,45 @@ def cmd_show(args):
     nid = g.resolve(args.id)
     n = g.nodes[nid]
     inbound = [{"rel": r, "from": f} for r, f in sorted(g.inbound.get(nid, []))]
+    t = n["type"]
+    extra = {}
+    if t == "result":
+        extra["review"] = g.review_state(nid)
+        extra["verdicts_on"] = g.verdicts_on(nid)
+    if t == "experiment":
+        extra["current_verdicts"] = g.current_verdicts(nid)
+        extra["missing_verdicts"] = g.missing_verdicts(nid)
+    if t in ("conclusion", "lead"):
+        a = g.latest_audit(nid)
+        if a:
+            extra["latest_audit"] = {"id": a, "verdict": g.nodes[a].get("verdict", ""),
+                                     "findings": g.nodes[a].get("findings", ""), "current": g.audit_current(a, nid)}
+        if n.get("status") == "pending":
+            extra["follow_ons"] = [{"id": x, "type": g.type(x), "title": g.nodes[x]["title"], "status": g.status(x),
+                                    "to": new} for x, new in g.follow_ons(nid)]
     if args.json:
-        emit(dict(json.loads(serialise(n)), inbound=inbound, retro=g.retro(nid)), True, [])
+        emit(dict(json.loads(serialise(n)), inbound=inbound, retro=g.retro(nid), **extra), True, [])
         return
     head = "%s  %s  %s%s" % (nid, n["type"], n.get("status") or n.get("verdict"), "  [retro]" if g.retro(nid) else "")
     lines = [head, n["title"], "by %s, created %s, updated %s" % (n["author"], n["created"], n["updated"])]
+    if n.get("origin"):
+        lines.append("origin: %s" % ("the user's read" if n["origin"] == "user" else "Claude's read, asked for by the user"))
     for k in fields_of(n["type"]):
-        if k in ("id", "type", "title", "author", "created", "updated", "status", "links", "log") or not n.get(k):
+        if k in ("id", "type", "title", "author", "created", "updated", "status", "links", "log", "origin") \
+                or not n.get(k):
             continue
         v = n[k]
-        if k == "predictions":
+        if k == "verdicts":
+            cur = g.current_verdicts(nid)
+            lines.append("verdicts:")
+            for x in v:
+                state = "current" if cur.get(x["hypothesis"]) is x else (
+                    "withdrawn" if g.status(x["result"]) != "valid" else "replaced")
+                lines.append("  %s %s %s on %s: %s  (%s, by %s%s)%s" % (
+                    x["date"], x["hypothesis"], x["verdict"], x["result"], x["basis"], state, x["author"],
+                    "; replaces the previous one: " + x.get("reason", "") if x.get("replaces") else "",
+                    " [retro]" if n.get("retrospective") else ""))
+        elif k == "predictions":
             lines.append("predictions:")
             for p in v:
                 lines.append("  %s: %s | metric: %s | rule: %s" % (p["hypothesis"], p["prediction"], p["metric"], p["decision_rule"]))
@@ -1170,6 +1598,19 @@ def cmd_show(args):
             lines.append("%s: %s" % (k, canonical(v)))
         else:
             lines.append("%s: %s" % (k, v))
+    if t == "result":
+        lines.append("review: %s" % extra["review"])
+    if t == "experiment" and n.get("status") in ("frozen", "done") and extra["missing_verdicts"]:
+        lines.append("no current verdict for: %s" % ", ".join(extra["missing_verdicts"]))
+    if extra.get("latest_audit"):
+        a = extra["latest_audit"]
+        lines.append("latest audit: %s %s%s: %s" % (a["id"], a["verdict"], "" if a["current"] else " (stale: changed since)",
+                                                    short(a["findings"], 200)))
+    elif t in ("conclusion", "lead") and n.get("status") == "pending":
+        lines.append("latest audit: none")
+    if extra.get("follow_ons"):
+        lines.append("follow-ons on confirm (nb confirm %s --also <id>):" % nid)
+        lines.extend("  %s %s -> %s: %s" % (f["id"], f["status"], f["to"], short(f["title"], 60)) for f in extra["follow_ons"])
     if n["links"]:
         lines.append("links:")
         lines.extend("  %-12s -> %s" % (l["rel"], row(g, l["to"], 60) if l["to"] in g.nodes else l["to"] + " (missing)") for l in n["links"])
@@ -1198,10 +1639,10 @@ def cmd_context(args):
                 if y in g.nodes and y not in seen:
                     seen.add(y)
                     nxt.append(y)
-                    items.append({"depth": depth, "via": x, "rel": rel, "dir": arrow, "node": brief(g, y)})
+                    items.append({"depth": depth, "via": x, "rel": rel, "dir": arrow, "node": node_brief(g, y)})
         frontier = nxt
     if args.json:
-        emit({"node": brief(g, root), "neighbours": items}, True, [])
+        emit({"node": node_brief(g, root), "neighbours": items}, True, [])
         return
     lines = [row(g, root)]
     for it in items:
@@ -1230,12 +1671,349 @@ def cmd_path(args):
     emit(None, False, lines)
 
 
+ORIGIN_WORDS = {"user": "from your read", "claude": "Claude's read"}
+
+
+def claim_notes(g, k, stale=True):
+    """['from your read', 'audit sound'] for a conclusion or lead; [] otherwise."""
+    n = g.nodes[k]
+    if n["type"] not in ("conclusion", "lead"):
+        return []
+    notes = [ORIGIN_WORDS[n["origin"]]] if n.get("origin") in ORIGIN_WORDS else []
+    a = g.latest_audit(k)
+    if a:
+        notes.append("audit %s%s" % (g.nodes[a].get("verdict", "?"),
+                                     " (stale)" if stale and n.get("status") == "pending" and not g.audit_current(a, k) else ""))
+    elif n.get("status") == "pending":
+        notes.append("not audited")
+    return notes
+
+
+def needs_closing(g):
+    """[(id, note)]: unreviewed results, experiments missing verdicts, stale interim-only work; oldest first."""
+    items = []
+    for r in g.unreviewed():
+        vs = ["%s %s" % (v["hypothesis"], v["verdict"]) for v in g.verdicts_on(r) if v["current"]]
+        items.append((r, "unreviewed" + (" (%s)" % ", ".join(vs) if vs else "")))
+    for e in g.verdicts_missing():
+        items.append((e, "result in, verdict missing (%s)" % ", ".join(g.missing_verdicts(e))))
+    for e in g.stale_interim():
+        items.append((e, "only interim results, older than %d days" % g.config("pending_days")))
+    return sorted(items, key=lambda x: (g.nodes[x[0]]["created"], x[0]))
+
+
 def cmd_pending(args):
     g = read()
     ids = sorted((k for k, n in g.nodes.items() if n.get("status") == "pending"),
                  key=lambda k: (g.nodes[k]["created"], k), reverse=True)
-    emit([brief(g, k) for k in ids], args.json,
-         ["%s  %s, %s" % (row(g, k), g.nodes[k]["author"], g.nodes[k]["created"]) for k in ids] or ["nothing pending"])
+    rows = [dict(node_brief(g, k), awaiting="confirm", origin=g.nodes[k].get("origin", ""),
+                 notes=claim_notes(g, k)) for k in ids]
+    lines = ["%s  %s" % (row(g, k), ", ".join([g.nodes[k]["author"]] + claim_notes(g, k) + [g.nodes[k]["created"]]))
+             for k in ids]
+    closing = needs_closing(g)
+    if closing:
+        lines += ["", "Needs closing (review with nb brief, then a conclusion or nb nothing-yet; or nb verdict):"]
+        lines += ["%s  %s" % (row(g, k), note) for k, note in closing]
+    rows += [dict(node_brief(g, k), awaiting="review" if g.type(k) == "result" else "closing", notes=[note])
+             for k, note in closing]
+    emit(rows, args.json, lines or ["nothing pending"])
+
+
+def cmd_gate(args):
+    g = read()
+    on = bool(g.config("freeze_gate"))
+    blockers = g.gate_blockers()
+    data = {"freeze_gate": on, "blocked": on and bool(blockers),
+            "blockers": [{"id": k, "type": g.type(k), "title": g.nodes[k]["title"], "why": why} for k, why in blockers]}
+    if not blockers:
+        lines = ["clear: nothing blocks nb freeze" + ("" if on else " (freeze_gate is off)")]
+    else:
+        lines = ["blocked: nb freeze is refused until these are closed:" if on else
+                 "freeze_gate is off, so nb freeze is not blocked; with it on, these would block it:"]
+        lines += ["  " + gate_line(g, k, why) for k, why in blockers]
+    emit(data, args.json, lines)
+
+
+# ---------------------------------------------------------------- brief ---
+
+STOP = set("""about above after again against also among another because been before being below between both
+could does doing done down during each either even every from further have having here into itself just
+less made make many more most much must near only other over same should since some such than that their
+them then there these they this those through under until upon very were what when where which while whom
+will with within without would your result results run runs using used versus""".split())
+RUN_RE = re.compile(r"\brun[\s_-]*(\d+)\b")
+WORD_RE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
+
+
+def title_tokens(title):
+    t = title.lower()
+    toks = {"run %s" % m for m in RUN_RE.findall(t)}
+    toks |= {w for w in WORD_RE.findall(RUN_RE.sub(" ", t)) if len(w) >= 4 and w not in STOP}
+    return toks
+
+
+def recent(g, ids):
+    return sorted(set(ids), key=lambda k: (g.nodes[k]["created"], k), reverse=True)
+
+
+def variant_chain(g, e):
+    """Experiments/explorations on e's variant-of chain (both directions), in chain order."""
+    comp, stack = {e}, [e]
+    while stack:
+        x = stack.pop()
+        for y in g.out(x, "variant-of") + g.into(x, "variant-of"):
+            if y in g.nodes and y not in comp:
+                comp.add(y)
+                stack.append(y)
+    depth = {}
+
+    def d(x, seen=()):
+        if x not in depth:
+            ups = [y for y in g.out(x, "variant-of") if y in comp and y not in seen]
+            depth[x] = 1 + max((d(y, seen + (x,)) for y in ups), default=-1)
+        return depth[x]
+
+    return sorted(comp, key=lambda x: (d(x), g.nodes[x]["created"], x))
+
+
+def results_of(g, producers):
+    out = []
+    for p in producers:
+        out += sorted(g.out(p, "produces"), key=lambda r: (g.nodes[r]["created"], r))
+    return out
+
+
+def result_questions(g, rid):
+    e = g.producer(rid)
+    if not e:
+        return []
+    if g.type(e) == "exploration":
+        return sorted(g.out(e, "investigates"))
+    return sorted({q for h in g.out(e, "tests") for q in g.out(h, "addresses")})
+
+
+def results_under(g, q):
+    prods = set(g.into(q, "investigates"))
+    for h in g.into(q, "addresses"):
+        prods.update(g.into(h, "tests"))
+    return [r for p in prods for r in g.out(p, "produces")]
+
+
+def related_unlinked(g, rid, exclude):
+    """Brief tier 4: [(id, shared)] ranked by shared tags and tokens, then recency."""
+    me = g.nodes[rid]
+    tags, toks = set(me.get("tags") or []), title_tokens(me["title"])
+    hits = []
+    for k, n in g.nodes.items():
+        if n["type"] != "result" or k == rid or k in exclude or n.get("status") != "valid":
+            continue
+        st, sk = tags & set(n.get("tags") or []), toks & title_tokens(n["title"])
+        if st or len(sk) >= 2:
+            hits.append((k, sorted(sk) + sorted(st - sk)))
+    hits.sort(key=lambda x: (g.nodes[x[0]]["created"], x[0]), reverse=True)  # recency breaks ties ...
+    hits.sort(key=lambda x: -len(x[1]))  # ... under the shared count (stable sort)
+    return hits
+
+
+def brief_item(g, k, shares=None):
+    n = g.nodes[k]
+    e = g.producer(k)
+    retro = bool(e and g.type(e) == "experiment" and g.nodes[e].get("retrospective"))
+    vs = [{"hypothesis": v["hypothesis"], "verdict": v["verdict"], "basis": v["basis"], "retro": retro}
+          for v in g.verdicts_on(k) if v["current"]]
+    return {"id": k, "title": n["title"], "producer": e, "status": n.get("status"), "interim": bool(n.get("interim")),
+            "verdicts": vs, "review": g.review_state(k), "shares": shares or []}
+
+
+def brief_line(it):
+    bits = []
+    for v in it["verdicts"]:
+        bits.append("%s %s: %s%s" % (v["hypothesis"], v["verdict"], short(v["basis"], 40), " [retro]" if v["retro"] else ""))
+    if it["shares"]:
+        bits.append("shares: " + ", ".join(it["shares"]))
+    bits.append(it["review"] if it["review"] in ("interim", "unreviewed") or it["review"].startswith("pending")
+                else it["review"])
+    if it["status"] == "invalidated":
+        bits.append("invalidated")
+    return "%-9s %-46s %s" % (it["id"], short(it["title"], 46), "   ".join(bits))
+
+
+def brief_data(g, rid, show_all=False):
+    n = g.nodes[rid]
+    e = g.producer(rid)
+    tier_cap, rel_cap = g.config("brief_tier_limit"), g.config("brief_related_limit")
+    listed = {rid}
+    retro = bool(e and g.nodes[e].get("retrospective"))
+    head = {"id": rid, "title": n["title"], "summary": n.get("summary", ""), "status": n.get("status"),
+            "interim": bool(n.get("interim")), "producer": e, "producer_type": g.type(e),
+            "producer_status": g.status(e), "retro": retro, "review": g.review_state(rid),
+            "verdicts": [dict(v, retro=retro) for v in g.verdicts_on(rid)]}
+
+    def tier(title, ids, cap, shares=None):
+        ids = [k for k in ids if k not in listed and g.status(k) == "valid"]
+        ids = list(dict.fromkeys(ids))
+        listed.update(ids)
+        shown = ids if show_all else ids[:cap]
+        return {"title": title, "items": [brief_item(g, k, (shares or {}).get(k)) for k in shown],
+                "more": len(ids) - len(shown)}
+
+    tiers = []
+    chain, linked = [], []
+    if e:
+        chain = results_of(g, variant_chain(g, e))
+        linked = list(g.out(e, "uses"))
+        linked += results_of(g, [x for x in g.into(rid, "uses")])
+        for h in g.out(e, "tests"):
+            linked += results_of(g, [x for x in g.into(h, "tests") if x != e])
+    tiers.append(tier("Directly linked", chain + recent(g, [k for k in linked if k not in chain]), tier_cap))
+    qs = result_questions(g, rid)
+    under = recent(g, [r for q in qs for r in results_under(g, q)])
+    qtitle = "Same question" + (" (%s)" % "; ".join("%s: %s" % (q, short(g.nodes[q]["title"], 50)) for q in qs) if qs else "")
+    tiers.append(tier(qtitle, under, tier_cap))
+    rel = related_unlinked(g, rid, listed)
+    tiers.append(tier("Possibly related, not linked", [k for k, _ in rel], rel_cap, dict(rel)))
+    every = [rid] + [it["id"] for t in tiers for it in t["items"]]
+    claims = [c for r in every for c in g.into(r, "derived-from", "suggested-by")
+              if g.status(c) in ("pending", "supported", "active", "followed")]
+    claims = recent(g, claims)
+    shown = claims if show_all else claims[:tier_cap]
+    claim_items = [{"id": c, "type": g.type(c), "status": g.status(c), "title": g.nodes[c]["title"],
+                    "notes": claim_notes(g, c, stale=False)} for c in shown]
+    open_qs = [q for q in qs if g.status(q) == "open"]
+    return {"result": head, "tiers": tiers, "claims": claim_items, "claims_more": len(claims) - len(shown),
+            "open_questions": [{"id": q, "title": g.nodes[q]["title"]} for q in open_qs]}
+
+
+def brief_text(g, b, rid):
+    h = b["result"]
+    state = "" if h["status"] == "valid" and not h["interim"] else \
+        "  [%s]" % ("interim: a partial result, not reviewed on its own" if h["interim"] else "invalidated")
+    lines = ["# Brief: %s  %s%s" % (rid, h["title"], state)]
+    if h["producer"]:
+        lines.append("%s %s (%s)%s" % (h["producer_type"], h["producer"], h["producer_status"], " [retro]" if h["retro"] else ""))
+    for v in h["verdicts"]:
+        lines.append("verdict %s %s: %s%s%s" % (v["hypothesis"], v["verdict"], v["basis"], " [retro]" if v["retro"] else "",
+                                                "" if v["current"] else " (no longer current)"))
+    if h["producer_type"] == "experiment" and not h["verdicts"] and not h["interim"]:
+        lines.append("verdicts: none recorded on this result")
+    lines.append("summary: %s" % h["summary"])
+    lines.append("review: %s" % h["review"])
+    more = "(+%d more: nb brief %s --all)"
+    for t in b["tiers"]:
+        lines.append("## " + t["title"])
+        lines.extend(brief_line(it) for it in t["items"])
+        if not t["items"] and not t["more"]:
+            lines.append("(none)")
+        if t["more"]:
+            lines.append(more % (t["more"], rid))
+    lines.append("## Conclusions and leads on these results")
+    lines.extend("%-9s %-10s %-9s %s%s" % (c["id"], c["type"], c["status"], short(c["title"], 60),
+                                           "   " + ", ".join(c["notes"]) if c["notes"] else "") for c in b["claims"])
+    if not b["claims"]:
+        lines.append("(none)")
+    if b["claims_more"]:
+        lines.append(more % (b["claims_more"], rid))
+    if b["open_questions"]:
+        lines.append("## Open questions")
+        lines.extend("%-9s %s" % (q["id"], q["title"]) for q in b["open_questions"])
+    return lines
+
+
+def cmd_brief(args):
+    g = read()
+    rid = g.resolve(args.id, {"result"})
+    b = brief_data(g, rid, args.all)
+    emit(b, args.json, brief_text(g, b, rid))
+
+
+# ---------------------------------------------------------------- audit ---
+
+def bundle_node(g, k, drop=("log",)):
+    d = json.loads(serialise(g.nodes[k]))
+    for f in drop:
+        d.pop(f, None)
+    return d
+
+
+def audit_bundle(g, nid):
+    n = g.nodes[nid]
+    cited = [r for r in g.out(nid, "derived-from", "suggested-by") if g.type(r) == "result"]
+    exps = list(dict.fromkeys(g.producer(r) for r in cited if g.producer(r)))
+    hyps = set(g.out(nid, "supports", "contradicts")) | {h for e in exps for h in g.out(e, "tests")}
+    hyps = {h for h in hyps if g.type(h) == "hypothesis"}
+    qs = set(g.out(nid, "answers", "raises")) | {q for h in hyps for q in g.out(h, "addresses")}
+    qs |= {q for e in exps for q in g.out(e, "investigates")}
+    uncited = [r for r in results_of(g, exps) if r not in cited]
+    near = set(r for e in exps for r in g.out(e, "produces"))
+    near |= {r for h in hyps for r in g.into(h, "supports", "contradicts") if g.type(r) == "result"}
+    near |= {r for h in hyps for e in g.into(h, "tests") for r in g.out(e, "produces")}
+    near |= {r for q in qs for r in results_under(g, q)}
+    since = [r for r in recent(g, near) if r not in cited and g.nodes[r]["created"] >= n["created"]]
+    others = set()
+    for h in hyps:
+        others.update(g.into(h, "supports", "contradicts"))
+        others.update(g.into(h, "spawns"))
+    for q in qs:
+        others.update(g.into(q, "answers", "raises"))
+    for r in cited:
+        others.update(g.into(r, "derived-from", "suggested-by"))
+    others = [c for c in recent(g, others) if c != nid and g.type(c) in ("conclusion", "lead")]
+    related = {}
+    for r in cited:
+        related[r] = [{"id": k, "title": g.nodes[k]["title"], "shares": s, "review": g.review_state(k)}
+                      for k, s in related_unlinked(g, r, set(cited))[:g.config("brief_related_limit")]]
+
+    def result(r):
+        return dict(bundle_node(g, r), review=g.review_state(r), verdicts_on=g.verdicts_on(r))
+
+    def experiment(e):
+        keep = ("id", "type", "title", "status", "retrospective", "spec", "execution", "predictions",
+                "verdicts", "deviations", "frozen_at", "runs", "body")
+        d = {k: v for k, v in bundle_node(g, e).items() if k in keep}
+        d["current_verdicts"] = g.current_verdicts(e) if g.type(e) == "experiment" else {}
+        return d
+
+    def claim(c):
+        a = g.latest_audit(c)
+        return dict(bundle_node(g, c), latest_audit=bundle_node(g, a) if a else None)
+
+    return {"node": dict(bundle_node(g, nid), retro=g.retro(nid)),
+            "cited_results": [result(r) for r in cited],
+            "experiments": [experiment(e) for e in exps],
+            "uncited_results": [result(r) for r in uncited],
+            "results_since": [result(r) for r in since if r not in uncited],
+            "other_claims": [claim(c) for c in others],
+            "possibly_related": related}
+
+
+AUDIT_SECTIONS = [
+    ("node", "The node under audit"),
+    ("cited_results", "Results it rests on"),
+    ("experiments", "Their experiments and explorations: frozen spec, predictions, decision rules, verdicts, deviations"),
+    ("uncited_results", "Other results of those experiments, not cited"),
+    ("results_since", "Results added since the node was created, on the same experiments, hypotheses or questions"),
+    ("other_claims", "Other conclusions and leads on the same questions, hypotheses or results"),
+    ("possibly_related", "Possibly related, not linked (brief tier 4 per cited result)"),
+]
+
+
+def cmd_audit(args):
+    g = read()
+    nid = g.resolve(args.id, {"conclusion", "lead"})
+    b = audit_bundle(g, nid)
+    lines = ["# Audit bundle: %s  %s" % (nid, g.nodes[nid]["title"]),
+             "Everything the auditor gets. JSON per item; dates are YYYY-MM-DD, *_at fields are notebook versions."]
+    for key, title in AUDIT_SECTIONS:
+        lines.append("")
+        lines.append("## " + title)
+        v = b[key]
+        if not v:
+            lines.append("(none)")
+        elif isinstance(v, list):
+            lines.extend(json.dumps(x, indent=1, ensure_ascii=False) for x in v)
+        else:
+            lines.append(json.dumps(v, indent=1, ensure_ascii=False))
+    emit(b, args.json, lines)
 
 
 def node_text(n):
@@ -1269,7 +2047,7 @@ def cmd_query(args):
     lines = [row(g, k) for k in ids]
     if total > len(ids):
         lines.append("(+%d more; --all)" % (total - len(ids)))
-    emit([brief(g, k) for k in ids], args.json, lines or ["no matches"])
+    emit([node_brief(g, k) for k in ids], args.json, lines or ["no matches"])
 
 
 def cmd_log(args):
@@ -1305,9 +2083,6 @@ def lint(g, full=True):
                 add("error", nid, "supported conclusion derives from invalidated %s" % ", ".join(bad))
             if len(g.out(nid, "derived-from")) < g.config("min_results_supported"):
                 add("warn", nid, "supported by fewer than %d results" % g.config("min_results_supported"))
-            for a in g.into(nid, "audits"):
-                if g.nodes[a].get("verdict") in ("concerns", "unsound"):
-                    add("warn", nid, "audit %s says %s" % (a, g.nodes[a]["verdict"]))
             contra = g.into(nid, "contradicts")
             if contra and full:
                 sha = n.get("confirmed_at")
@@ -1321,11 +2096,31 @@ def lint(g, full=True):
                     then = old.nodes.get(c) if old else None
                     if not then or not any(l["rel"] == "contradicts" and l["to"] == nid for l in then["links"]):
                         add("warn", nid, "contradicted by %s, added after it was confirmed" % c)
+        if t in ("conclusion", "lead") and st in ("supported", "pending"):
+            a = g.latest_audit(nid)
+            if a and g.nodes[a].get("verdict") in ("concerns", "unsound"):
+                add("warn", nid, "latest audit %s says %s" % (a, g.nodes[a]["verdict"]))
         backers = lambda rel, ty, s: [c for c in g.into(nid, rel) if g.type(c) == ty and g.status(c) == s]
         if t == "hypothesis" and st in ("supported", "refuted"):
-            if not backers("supports" if st == "supported" else "contradicts", "conclusion", "supported"):
-                add("warn", nid, "%s, but no supported conclusion %s it any more"
+            agree = [v for e in g.into(nid, "tests") if g.type(e) == "experiment"
+                     for h, v in g.current_verdicts(e).items() if h == nid and VERDICT_STATUS.get(v["verdict"]) == st]
+            if not agree and not backers("supports" if st == "supported" else "contradicts", "conclusion", "supported"):
+                add("warn", nid, "%s, but neither a current verdict nor a supported conclusion that %s it is behind it"
                     % (st, "supports" if st == "supported" else "contradicts"))
+        if t == "hypothesis":
+            cur = {}
+            for e in g.into(nid, "tests"):
+                if g.type(e) == "experiment" and nid in g.current_verdicts(e):
+                    cur[e] = g.current_verdicts(e)[nid]["verdict"]
+            if len(set(cur.values())) > 1:
+                add("warn", nid, "conflicting current verdicts: %s"
+                    % ", ".join("%s %s" % (cur[e], e) for e in sorted(cur)))
+        if t == "experiment" and st == "done" and g.missing_verdicts(nid):
+            add("warn", nid, "done, but no current verdict for %s (backfill with nb verdict)"
+                % ", ".join(g.missing_verdicts(nid)))
+        if t == "result" and g.final(nid) and not n.get("reviews") and age_days(n["created"]) > g.config("pending_days"):
+            add("warn", nid, "unreviewed for %d days (nb brief %s, then a conclusion, a lead or nb nothing-yet)"
+                % (age_days(n["created"]), nid))
         if t == "question" and st == "answered" and not backers("answers", "conclusion", "supported"):
             add("warn", nid, "answered, but no supported conclusion answers it any more")
         if t == "question" and st == "settled" and not backers("affects", "decision", "active"):
@@ -1339,6 +2134,9 @@ def lint(g, full=True):
                 age = 0
             if age > g.config("pending_days"):
                 add("warn", nid, "pending for %d days (nb confirm or nb reject)" % age)
+    for k in g.stale_interim():
+        add("warn", k, "only interim results, the newest older than %d days (record the final result, or abandon)"
+            % g.config("pending_days"))
     if full:
         lint_provenance(g, add)
     order = {"error": 0, "warn": 1}
@@ -1410,8 +2208,12 @@ def prime_text(g, max_chars):
     sections.append(("Goals", ids, lambda k: line(k), "nb query --type goal --status active"))
     ids = pick(lambda k, n: n.get("status") == "pending", lambda k: (nodes[k]["created"], k))
     sections.append(("Awaiting the user (pending, not established)", ids,
-                     lambda k: line(k, "%s, %s, %s" % (nodes[k]["type"], nodes[k]["author"], nodes[k]["created"]), 70),
+                     lambda k: line(k, ", ".join([nodes[k]["type"], nodes[k]["author"]] + claim_notes(g, k)
+                                                 + [nodes[k]["created"]]), 60),
                      "nb pending"))
+    closing = needs_closing(g)
+    notes = dict(closing)
+    sections.append(("Needs closing", [k for k, _ in closing], lambda k: line(k, notes[k], 55), "nb pending"))
     ids = pick(lambda k, n: n["type"] in ("experiment", "exploration") and n["status"] == "frozen",
                lambda k: last_event_date(nodes[k], "freeze"))
 
@@ -1425,9 +2227,14 @@ def prime_text(g, max_chars):
     sections.append(("Open questions", ids, lambda k: line(k), "nb query --type question --status open"))
     ids = pick(lambda k, n: n["type"] == "conclusion" and n["status"] == "supported",
                lambda k: (last_event_date(nodes[k], "confirm"), k))
-    sections.append(("Recent conclusions", ids,
-                     lambda k: line(k, ("confidence " + nodes[k]["confidence"]) if nodes[k].get("confidence") else ""),
-                     "nb query --type conclusion --status supported"))
+
+    def concl(k):
+        bits = [("confidence " + nodes[k]["confidence"]) if nodes[k].get("confidence") else ""]
+        a = g.latest_audit(k)
+        if a and nodes[a].get("verdict") in ("concerns", "unsound"):
+            bits.append("audit %s (%s)" % (nodes[a]["verdict"], a))
+        return line(k, ", ".join(b for b in bits if b))
+    sections.append(("Recent conclusions", ids, concl, "nb query --type conclusion --status supported"))
     ids = pick(lambda k, n: n["type"] == "lead" and n["status"] == "active", lambda k: (nodes[k]["updated"], k))
     sections.append(("Active leads", ids, lambda k: line(k), "nb query --type lead --status active"))
 
@@ -1481,8 +2288,29 @@ def cmd_prime(args):
 
 # ----------------------------------------------------------------- sync ---
 
-def merge_nodes(base, ours, theirs):
-    """Three-way merge of node dicts. Returns (merged, conflicts)."""
+def merge_lists(bk, ok, tk):
+    """Set merge: keep what either side added, drop what either side removed (unlink, retract);
+    base order, then ours, then theirs."""
+    bs, os_, ts = ({canonical(x) for x in l or []} for l in (bk, ok, tk))
+    v, seen = [], set()
+    for x in (bk or []) + (ok or []) + (tk or []):
+        c = canonical(x)
+        if c not in seen and (c in os_ and c in ts if c in bs else True):
+            seen.add(c)
+            v.append(x)
+    return v
+
+
+def derived_status(node):
+    """Statuses nb derives (recomputed after a merge rather than conflicting)."""
+    return node.get("type") == "hypothesis" or node.get("type") == "experiment"
+
+
+def merge_nodes(base, ours, theirs, rederive=None):
+    """Three-way merge of node dicts. Returns (merged, conflicts).
+
+    rederive, if given, collects ids whose derived status changed differently on both sides.
+    """
     merged, conflicts = {}, []
     for nid in sorted(set(base) | set(ours) | set(theirs)):
         b, o, t = base.get(nid), ours.get(nid), theirs.get(nid)
@@ -1499,21 +2327,29 @@ def merge_nodes(base, ours, theirs):
             res = {}
             for k in sorted(set(b) | set(o) | set(t)):
                 bk, ok, tk = b.get(k), o.get(k), t.get(k)
-                if ok == tk:
+                if k in FIXED_FIELDS and ok != tk:
+                    conflicts.append("%s: %s is fixed at creation but differs (%r vs %r)" % (nid, k, ok, tk))
+                    v = ok
+                elif k == "verdicts" and ok != tk and ok != bk and tk != bk:
+                    bs = {canonical(x) for x in bk or []}
+                    new_o = {x.get("hypothesis") for x in ok or [] if canonical(x) not in bs and isinstance(x, dict)}
+                    new_t = {x.get("hypothesis") for x in tk or [] if canonical(x) not in bs and isinstance(x, dict)}
+                    for h in sorted(new_o & new_t):
+                        conflicts.append("%s: both sides added a verdict for %s" % (nid, h))
+                    v = merge_lists(bk, ok, tk)
+                elif k == "status" and ok != tk and ok != bk and tk != bk and rederive is not None \
+                        and derived_status(o) and (o.get("type") == "hypothesis"
+                                                   or {ok, tk} <= {"frozen", "done"}):
+                    rederive.add(nid)
+                    v = ok
+                elif ok == tk:
                     v = ok
                 elif ok == bk:
                     v = tk
                 elif tk == bk:
                     v = ok
                 elif k in APPEND_LISTS and all(isinstance(x, list) for x in (bk or [], ok or [], tk or [])):
-                    # set merge: keep what either side added, drop what either side removed (unlink, retract)
-                    bs, os_, ts = ({canonical(x) for x in l or []} for l in (bk, ok, tk))
-                    v, seen = [], set()
-                    for x in (bk or []) + (ok or []) + (tk or []):
-                        c = canonical(x)
-                        if c not in seen and (c in os_ and c in ts if c in bs else True):
-                            seen.add(c)
-                            v.append(x)
+                    v = merge_lists(bk, ok, tk)
                 elif k == "updated":
                     v = max(ok or "", tk or "")
                 else:
@@ -1558,7 +2394,8 @@ def cmd_sync(args):
             base = Graph.load(git, base_sha) if base_sha else Graph(git, None, {"config": {}}, {}, {})
             g_ours, g_theirs = Graph.load(git, local), Graph.load(git, remote)
             strip = lambda gr: {k: json.loads(serialise(n)) for k, n in gr.nodes.items()}
-            nodes, conflicts = merge_nodes(strip(base), strip(g_ours), strip(g_theirs))
+            rederive = set()
+            nodes, conflicts = merge_nodes(strip(base), strip(g_ours), strip(g_theirs), rederive)
             conf, cconf = merge_nodes({"c": base.meta.get("config", {})}, {"c": g_ours.meta["config"]},
                                       {"c": g_theirs.meta["config"]})
             conflicts += [c.replace("c: ", "config: ", 1) for c in cconf]
@@ -1569,6 +2406,16 @@ def cmd_sync(args):
             for n in merged.nodes.values():
                 for k, kind in fields_of(n.get("type")).items():
                     n.setdefault(k, default(kind))
+            # Derived statuses are recomputed from the merged graph, not merged.
+            merged.changed()
+            hyps = [k for k, n in merged.nodes.items() if n["type"] == "hypothesis" and merged.hyp_events(k)]
+            exps = [k for k, n in merged.nodes.items() if n["type"] == "experiment" and n.get("status") == "frozen"]
+            changes = merged.recompute(hyps, exps, event="sync")
+            changes += merged.recompute([k for k in rederive if merged.type(k) == "hypothesis"],
+                                        [k for k in rederive if merged.type(k) == "experiment"],
+                                        event="sync", reopen=True, force=True)
+            for c in changes:
+                say("recomputed %s" % c)
             before = set(validate(g_ours)) | set(validate(g_theirs))
             new = [e for e in validate(merged) if e not in before]
             if new:
@@ -1623,7 +2470,11 @@ def build_parser():
                     help="conclusion: derived-from result; lead: suggested-by result; repeat per value")
     sp.add_argument("--reject", action="append", metavar="ALT", help="decision: alternative not taken; repeat per value")
     sp.add_argument("--revisit-if", dest="revisit_if")
-    sp.add_argument("--of", metavar="CON", help="audit: the audited conclusion")
+    sp.add_argument("--origin", choices=sorted(ENUMS["origin"]),
+                    help="conclusion/lead: user (drafted from the user's read) or claude (Claude's read, asked for)")
+    sp.add_argument("--user-words", dest="user_words", metavar="TEXT",
+                    help="conclusion/lead: the user's read, verbatim ('-' reads stdin); required with --origin user")
+    sp.add_argument("--of", metavar="ID", help="audit: the audited conclusion or lead")
     sp.add_argument("--verdict", choices=sorted(ENUMS["verdict"]))
     sp.add_argument("--findings")
     sp.add_argument("--auditor")
@@ -1671,9 +2522,27 @@ def build_parser():
     sp.add_argument("--commit", help="code commit, if not HEAD")
     sp.add_argument("--tag", action="append")
     sp.add_argument("--link", action="append", metavar="REL:ID", help="supports or contradicts; repeat per value")
+    sp.add_argument("--interim", action="store_true", help="a partial result: no verdicts, not reviewed on its own")
+    sp.add_argument("--verdict", nargs=3, action="append", metavar=("HYP", "VERDICT", "BASIS"),
+                    help="apply the frozen rule: supported|refuted|inconclusive and the value vs the bound; "
+                         "once per predicted hypothesis")
+
+    sp = add("verdict", cmd_verdict, "add a verdict judged on an existing result, or replace one (--replace)")
+    sp.add_argument("result")
+    sp.add_argument("hypothesis")
+    sp.add_argument("verdict", choices=VERDICTS)
+    sp.add_argument("--basis", required=True, help="the measured value and the bound from the rule")
+    sp.add_argument("--replace", action="store_true", help="replace the current verdict (the user's approval)")
+    sp.add_argument("--reason", help="why, required with --replace")
+
+    sp = add("nothing-yet", cmd_nothing_yet, "record that the user reviewed results and has nothing to conclude yet")
+    sp.add_argument("results", nargs="+", metavar="RES")
+    sp.add_argument("--note")
 
     sp = add("confirm", cmd_confirm, "establish a pending node (the user's approval)")
     sp.add_argument("id")
+    sp.add_argument("--also", action="append", metavar="ID",
+                    help="apply a follow-on status change the conclusion allows (see nb show); repeat per value")
 
     sp = add("reject", cmd_reject, "reject a pending node")
     sp.add_argument("id")
@@ -1712,7 +2581,19 @@ def build_parser():
     sp.add_argument("id")
     json_flag(sp)
 
-    sp = add("pending", cmd_pending, "nodes awaiting the user")
+    sp = add("pending", cmd_pending, "nodes awaiting the user, unreviewed results and missing verdicts")
+    json_flag(sp)
+
+    sp = add("brief", cmd_brief, "what the user needs to draw a conclusion from a result")
+    sp.add_argument("id")
+    sp.add_argument("--all", action="store_true", help="no per-tier caps")
+    json_flag(sp)
+
+    sp = add("audit", cmd_audit, "the bundle an auditor gets for a conclusion or lead")
+    sp.add_argument("id")
+    json_flag(sp)
+
+    sp = add("gate", cmd_gate, "whether nb freeze would pass the freeze gate now")
     json_flag(sp)
 
     sp = add("query", cmd_query, "find nodes (newest first, %d unless --all)" % LIST_LIMIT)

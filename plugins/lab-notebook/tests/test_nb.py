@@ -91,7 +91,21 @@ class NbCase(unittest.TestCase):
         self.ok("init")
 
     def add(self, typ, title, *args, **kw):
+        if typ in ("conclusion", "lead") and kw.get("author") == "claude" and "--origin" not in args:
+            args += ("--origin", "claude")  # required for Claude's drafts; the origin tests pass it explicitly
         return self.ok("add", typ, title, *args, **kw).split()[-1]
+
+    def audit(self, nid, verdict="sound", findings="none", **kw):
+        """Record an audit of nid (Claude records it; not gated)."""
+        kw.setdefault("author", "claude")
+        return self.add("audit", "Audit", "--of", nid, "--verdict", verdict, "--findings", findings, **kw)
+
+    def confirm(self, nid, *args, **kw):
+        """Audit a pending Claude draft, then confirm it (audit_before_confirm is on by default)."""
+        n = self.show(nid)
+        if n["type"] in ("conclusion", "lead") and n["author"] == "claude":
+            self.audit(nid)
+        return self.ok("confirm", nid, *args, **kw)
 
     def show(self, nid, **kw):
         return json.loads(self.ok("show", nid, "--json", **kw))
@@ -499,8 +513,8 @@ class TestPredictFreeze(SnapCase):
         self.ok("deviate", d["e"], "ran 3 seeds not 5", author="claude")
         dev = self.show(d["e"])["deviations"]
         self.assertEqual([(x["text"], x["author"], x["date"]) for x in dev], [("ran 3 seeds not 5", "claude", TODAY)])
-        self.ok("result", d["e"], "res")
-        self.ok("status", d["e"], "done")
+        self.ok("result", d["e"], "res", "--verdict", d["h"], "supported", "m 1 > 0")
+        self.assertEqual(self.show(d["e"])["status"], "done")
         self.ok("deviate", d["e"], "later note")
         e = self.show(d["e"])
         self.assertEqual(len(e["deviations"]), 2)
@@ -536,7 +550,7 @@ class TestResults(SnapCase):
         self.ok("freeze", d["e"])
         r = self.ok("result", d["e"], "s")
         self.assertIn({"rel": "produces", "to": r}, self.show(d["e"])["links"])
-        self.ok("status", d["e"], "done")
+        self.ok("verdict", r, d["h"], "refuted", "--basis", "m 0.1 < 0.5")
         self.assertIn("done", self.fails("result", d["e"], "again"))
 
     def test_provenance_commit_dirty_cwd(self):
@@ -660,6 +674,7 @@ class TestConclusions(SnapCase):
         n = self.show(c)
         self.assertEqual(n["status"], "pending")
         self.assertNotIn("confirmed_at", n)
+        self.audit(c)
         before = self.head()
         self.ok("confirm", c)
         n = self.show(c)
@@ -682,7 +697,7 @@ class TestConclusions(SnapCase):
         c1 = self.concl(d["r"])
         c2 = self.concl(d["r"], "--link", "supersedes:" + c1, author="claude", title="Newer")
         self.assertEqual(self.show(c1)["status"], "supported")
-        self.ok("confirm", c2)
+        self.confirm(c2)
         self.assertEqual(self.show(c1)["status"], "superseded")
 
     def test_hypothesis_supersession_immediate_even_for_claude(self):
@@ -725,18 +740,16 @@ class TestConclusions(SnapCase):
 # =================================================== 8 status rules ===
 
 class TestStatusRules(SnapCase):
-    def test_hypothesis_verdicts(self):
+    def test_hypothesis_status_not_set_by_hand(self):
         d = self.d
-        self.assertIn("supports", self.fails("status", d["h"], "supported"))
-        c = self.concl(d["r"], "--link", "supports:" + d["h"], author="claude")
-        self.fails("status", d["h"], "supported")  # pending conclusion does not count
-        self.ok("confirm", c)
-        self.assertIn("contradicts", self.fails("status", d["h"], "refuted"))
-        self.ok("status", d["h"], "supported")
-        c2 = self.concl(d["r"], "--link", "contradicts:" + d["h"], title="C2")
-        self.assertIn("reason", self.fails("status", d["h"], "refuted"))
-        self.ok("status", d["h"], "refuted", "--reason", "new data")
-        self.assertEqual(self.show(d["h"])["status"], "refuted")
+        self.assertIn("verdict", self.fails("status", d["h"], "supported"))
+        c = self.concl(d["r"], "--link", "supports:" + d["h"])  # a supported conclusion is not enough now
+        self.fails("status", d["h"], "supported")
+        self.fails("status", d["h"], "refuted", "--reason", "x")
+        self.assertIn("reason", self.fails("status", d["h"], "superseded"))
+        self.ok("status", d["h"], "superseded", "--reason", "folded into a broader hypothesis")
+        self.assertEqual(self.show(d["h"])["status"], "superseded")
+        self.assertTrue(c)
 
     def test_question_answered_and_settled(self):
         d = self.d
@@ -750,17 +763,22 @@ class TestStatusRules(SnapCase):
         self.fails("status", d["q"], "answered")  # a decision does not answer
         self.ok("status", d["q"], "settled")
         self.ok("status", d["q"], "open", "--reason", "revisit")
-        self.ok("confirm", c)
+        self.confirm(c)
         self.ok("status", d["q"], "answered")
         self.assertIn("--reason", self.fails("status", d["q"], "open"))
 
-    def test_experiment_done_needs_result(self):
+    def test_experiment_done_only_by_verdicts(self):
         d = self.d
         self.reset("draft")
         self.ok("freeze", d["e"])
-        self.assertIn("result", self.fails("status", d["e"], "done"))
+        self.assertIn("verdict", self.fails("status", d["e"], "done"))
         self.ok("result", d["e"], "s")
-        self.ok("status", d["e"], "done")
+        self.fails("status", d["e"], "done")
+        x = self.add("exploration", "X", "--spec", "look", "--exec", "analysis", "--link", "investigates:" + d["q"])
+        self.ok("freeze", x)
+        self.assertIn("result", self.fails("status", x, "done"))
+        self.ok("result", x, "s")
+        self.ok("status", x, "done")
 
     def test_lead_followed(self):
         d = self.d
@@ -1007,7 +1025,8 @@ class TestLint(SnapCase):
         self.reset("full")
         self.add("goal", "G2", "--link", "supersedes:" + d["g"])
         self.assertLint("error", d["e"], "no path to an active goal")
-        self.ok("status", d["e"], "done")  # done experiments are history
+        self.ok("verdict", d["r"], d["h"], "supported", "--basis", "m 1 > 0")  # done experiments are history
+        self.assertEqual(self.show(d["e"])["status"], "done")
         self.assertEqual([m for m in self.lint_msgs()[1] if m[1] == d["e"]], [])
 
     def test_drift_warning_for_chain_of_two_leads(self):
@@ -1039,11 +1058,20 @@ class TestLint(SnapCase):
 
     def test_lost_hypothesis_verdict(self):
         d = self.d
-        c1 = self.concl(d["r"], "--link", "supports:" + d["h"])
-        self.ok("status", d["h"], "supported")
-        self.assertNoLint(d["h"], "no supported conclusion")
+        c1 = self.concl(d["r"], "--link", "supports:" + d["h"], author="claude")
+        self.confirm(c1, "--also", d["h"])
+        self.assertEqual(self.show(d["h"])["status"], "supported")
+        self.assertNoLint(d["h"], "neither a current verdict")
         self.concl(d["r"], "--link", "supersedes:" + c1, title="Newer")
-        self.assertEqual(self.assertLint("warn", d["h"], "no supported conclusion"), 0)
+        self.assertEqual(self.assertLint("warn", d["h"], "neither a current verdict nor a supported conclusion"), 0)
+
+    def test_hypothesis_backed_by_verdict_does_not_warn(self):
+        d = self.d
+        self.ok("verdict", d["r"], d["h"], "refuted", "--basis", "m 0.1 < 0.5")
+        self.assertNoLint(d["h"], "neither")
+        self.ok("invalidate", d["r"], "--reason", "bug")  # withdraws the verdict; status recomputed, no warning
+        self.assertEqual(self.show(d["h"])["status"], "open")
+        self.assertNoLint(d["h"], "neither")
 
     def test_lost_answered_verdict(self):
         d = self.d
@@ -1081,7 +1109,7 @@ class TestLint(SnapCase):
         c = self.concl(d["r"], author="claude")
         r2 = self.ok("result", d["e"], "other result")
         self.ok("link", r2, "contradicts", c)
-        self.ok("confirm", c)
+        self.confirm(c)
         self.assertNoLint(c, "contradicted")
 
     def test_audit_verdicts(self):
@@ -1206,10 +1234,15 @@ class TestPrime(SnapCase):
         self.concl(d["r"], "--confidence", "high")
         self.add("lead", "Lead", "--rationale", "r", "--from", d["r"])
         self.add("goal", "Pending goal", author="claude")
+        r2 = self.ok("result", d["e"], "another result")  # unreviewed, and the experiment lacks a verdict
         s = sections(self.ok("prime"))
-        self.assertEqual(list(s)[:6], ["Goals", "Awaiting the user (pending, not established)", "In flight (frozen)",
-                                       "Open questions", "Recent conclusions", "Active leads"])
-        self.assertIn("1 result", s["In flight (frozen)"][0])
+        self.assertEqual(list(s)[:7], ["Goals", "Awaiting the user (pending, not established)", "Needs closing",
+                                       "In flight (frozen)", "Open questions", "Recent conclusions", "Active leads"])
+        closing = "\n".join(s["Needs closing"])
+        self.assertIn(r2 + " ", closing)
+        self.assertIn("unreviewed", closing)
+        self.assertIn("verdict missing", closing)
+        self.assertIn("2 result", s["In flight (frozen)"][0])
         self.assertIn("0 runs", s["In flight (frozen)"][0])
         self.assertIn("confidence high", s["Recent conclusions"][0])
 
@@ -1280,9 +1313,20 @@ class TestReads(SnapCase):
         self.assertIn("no path", self.ok("path", e2))
 
     def test_pending(self):
-        self.assertEqual([r["id"] for r in json.loads(self.ok("pending", "--json"))], [self.c])
-        self.assertIn(self.c, self.ok("pending"))
-        self.ok("confirm", self.c)
+        d = self.d
+        rows = json.loads(self.ok("pending", "--json"))
+        self.assertEqual([(r["id"], r["awaiting"]) for r in rows],
+                         [(self.c, "confirm"), (d["e"], "closing"), (d["r"], "review")])
+        self.assertEqual(rows[0]["origin"], "claude")
+        self.assertIn("not audited", rows[0]["notes"])
+        out = self.ok("pending")
+        self.assertIn(self.c, out)
+        self.assertIn("Claude's read", out)
+        self.assertIn("Needs closing", out)
+        self.confirm(self.c)  # reviews d["r"]
+        self.assertEqual([(r["id"], r["awaiting"]) for r in json.loads(self.ok("pending", "--json"))],
+                         [(d["e"], "closing")])
+        self.ok("verdict", d["r"], d["h"], "supported", "--basis", "m 1 > 0")
         self.assertEqual(json.loads(self.ok("pending", "--json")), [])
         self.assertIn("nothing pending", self.ok("pending"))
 
@@ -1365,7 +1409,9 @@ class TestConfig(NbCase):
         self.init()
         self.assertEqual(json.loads(self.ok("config", "get", "--json")),
                          {"prime_max_chars": 4000, "prime_section_limit": 5, "pending_days": 7, "drift_leads": 2,
-                          "min_results_supported": 1, "run_patterns": []})
+                          "min_results_supported": 1, "run_patterns": [], "freeze_gate": False,
+                          "audit_before_confirm": True, "auditor_model": "sonnet", "brief_tier_limit": 8,
+                          "brief_related_limit": 5})
         self.assertEqual(json.loads(self.ok("config", "get", "pending_days", "--json")), {"pending_days": 7})
         self.assertIn("pending_days = 7", self.ok("config", "get", "pending_days"))
 
@@ -1382,7 +1428,8 @@ class TestConfig(NbCase):
         self.init()
         h = self.head()
         self.assertIn("int", self.fails("config", "set", "pending_days", "abc"))
-        for k, v in (("pending_days", "true"), ("pending_days", "1.5"), ("run_patterns", "5"), ("bogus", "1")):
+        for k, v in (("pending_days", "true"), ("pending_days", "1.5"), ("run_patterns", "5"), ("bogus", "1"),
+                     ("freeze_gate", "1"), ("freeze_gate", "yes"), ("auditor_model", "3")):
             self.fails("config", "set", k, v)
         self.fails("config", "set", "pending_days")
         self.fails("config", "get", "bogus")
@@ -1659,6 +1706,609 @@ class TestFixture(unittest.TestCase):
     def test_retro_flags(self):
         self.assertFalse(self.node("E_multi")["retro"])
         self.assertTrue(self.node("E_cmt2")["retro"])
+
+
+# ============================================ 19 closing the loop ===
+
+def nb_full(case, *args, **kw):
+    """(stdout, stderr) of a successful nb call."""
+    rc, out, err = case.nb(*args, **kw)
+    case.assertEqual(rc, 0, "nb %s failed\nstdout: %s\nstderr: %s" % (" ".join(args), out, err))
+    return out.strip(), err
+
+
+class TestVerdicts(SnapCase):
+    def second_hyp(self, title="H2"):
+        return self.add("hypothesis", title, "--prediction", "p2", "--link", "addresses:" + self.d["q"])
+
+    def test_result_with_verdict_applies_at_once(self):
+        d = self.d
+        self.reset("draft")
+        self.ok("freeze", d["e"])
+        out, err = nb_full(self, "result", d["e"], "m was 0.1", "--verdict", d["h"], "refuted", "m 0.1 < 0.5")
+        self.assertRegex(out, ID_RE % "res")
+        self.assertIn("added result %s: m was 0.1" % out, err)
+        self.assertIn("verdict %s refuted: m 0.1 < 0.5" % d["h"], err)
+        self.assertIn("%s open -> refuted" % d["h"], err)
+        self.assertIn("%s frozen -> done" % d["e"], err)
+        self.assertEqual(self.show(d["h"])["status"], "refuted")
+        e = self.show(d["e"])
+        self.assertEqual(e["status"], "done")
+        self.assertEqual(e["verdicts"], [{"hypothesis": d["h"], "verdict": "refuted", "result": out,
+                                          "basis": "m 0.1 < 0.5", "date": TODAY, "author": "user"}])
+        self.assertEqual(self.lint_msgs()[0], 0)
+
+    def test_invalid_verdict_refuses_whole_result(self):
+        d = self.d
+        h2 = self.second_hyp()
+        before, n = self.head(), len(self.query("--type", "result"))
+        for extra in (["--verdict", d["h"], "supported", "b", "--verdict", h2, "supported", "b"],  # h2 not predicted
+                      ["--verdict", d["h"], "proven", "b"],
+                      ["--verdict", d["h"], "supported", "  "],
+                      ["--verdict", d["h"], "supported", "b", "--verdict", d["h"], "refuted", "b"],
+                      ["--verdict", d["h"], "supported", "b", "--interim"]):
+            self.fails("result", d["e"], "s", *extra)
+        self.assertIn("does not predict", self.fails("result", d["e"], "s", "--verdict", h2, "supported", "b"))
+        self.assertEqual((self.head(), len(self.query("--type", "result"))), (before, n))
+        x = self.add("exploration", "X", "--spec", "look", "--exec", "analysis", "--link", "investigates:" + d["q"])
+        self.ok("freeze", x)
+        self.assertIn("exploration", self.fails("result", x, "s", "--verdict", d["h"], "supported", "b"))
+        self.assertIn("unknown field", self.fails("set", x, "verdicts", "x") + "unknown field")
+
+    def test_backfill_and_replace_flags(self):
+        d = self.d
+        self.assertIn("no current verdict", self.fails("verdict", d["r"], d["h"], "supported", "--basis", "b",
+                                                       "--replace", "--reason", "x"))
+        out = self.ok("verdict", d["r"], d["h"], "supported", "--basis", "m 0.9 > 0.5")
+        self.assertIn("frozen -> done", out)
+        self.assertEqual(self.show(d["h"])["status"], "supported")
+        self.assertIn("--replace", self.fails("verdict", d["r"], d["h"], "refuted", "--basis", "b"))
+        self.assertIn("--reason", self.fails("verdict", d["r"], d["h"], "refuted", "--basis", "b", "--replace"))
+        self.fails("verdict", d["r"], d["h"], "refuted", "--basis", "b", "--reason", "x")
+        self.fails("verdict", d["r"], d["h"], "refuted", "--replace", "--reason", "x")  # --basis required
+        self.ok("verdict", d["r"], d["h"], "refuted", "--basis", "m 0.4 < 0.5 after the unit fix",
+                "--replace", "--reason", "metric was read in the wrong units")
+        v = self.show(d["e"])["verdicts"]
+        self.assertEqual(len(v), 2)
+        self.assertEqual((v[1]["replaces"], v[1]["reason"]), (True, "metric was read in the wrong units"))
+        self.assertEqual(self.show(d["h"])["status"], "refuted")
+        self.assertIn("replaced", self.ok("show", d["e"]))
+        self.assertEqual(self.lint_msgs()[0], 0)
+
+    def test_second_result_same_hypothesis_is_a_replacement(self):
+        d = self.d
+        h2 = self.second_hyp()
+        e2 = self.add("experiment", "E2", "--spec", "S", "--exec", "command")
+        self.predict(e2, d["h"])
+        self.predict(e2, h2)
+        self.ok("freeze", e2)
+        r1 = self.ok("result", e2, "first", "--verdict", d["h"], "supported", "b1")
+        self.assertEqual(self.show(e2)["status"], "frozen")  # h2 still has no verdict
+        self.assertIn("replacement", self.fails("result", e2, "second", "--verdict", d["h"], "refuted", "b2"))
+        r2 = self.ok("result", e2, "second", "--verdict", h2, "inconclusive", "b3")
+        self.assertEqual(self.show(e2)["status"], "done")
+        self.assertIn("--replace", self.fails("verdict", r2, d["h"], "refuted", "--basis", "b"))
+        # a replacement may be judged on another result of the same experiment
+        self.ok("verdict", r1, h2, "refuted", "--basis", "b", "--replace", "--reason", "x")
+        self.assertEqual(self.show(h2)["status"], "refuted")
+
+    def test_verdicts_only_on_valid_final_experiment_results(self):
+        d = self.d
+        ri = self.ok("result", d["e"], "partial", "--interim")
+        self.assertIn("interim", self.fails("verdict", ri, d["h"], "supported", "--basis", "b"))
+        self.ok("invalidate", d["r"], "--reason", "bug")
+        self.fails("verdict", d["r"], d["h"], "supported", "--basis", "b")
+        x = self.add("exploration", "X", "--spec", "look", "--exec", "analysis", "--link", "investigates:" + d["q"])
+        self.ok("freeze", x)
+        rx = self.ok("result", x, "seen")
+        self.assertIn("exploration", self.fails("verdict", rx, d["h"], "supported", "--basis", "b"))
+
+    def test_most_recent_event_wins_and_inconclusive_reopens(self):
+        d = self.d
+        self.ok("verdict", d["r"], d["h"], "supported", "--basis", "b")
+        e2, _ = self.new_exp(d["h"], result=False)
+        self.ok("result", e2, "r2", "--verdict", d["h"], "refuted", "b2", today="2026-10-29")
+        self.assertEqual(self.show(d["h"])["status"], "refuted")
+        self.assertLint("warn", d["h"], "conflicting current verdicts", today="2026-10-29")
+        e3, _ = self.new_exp(d["h"], result=False, title="E3")
+        self.ok("result", e3, "r3", "--verdict", d["h"], "inconclusive", "b3", today="2026-10-30")
+        h = self.show(d["h"])
+        self.assertEqual(h["status"], "open")
+        self.assertEqual((h["log"][-1]["event"], h["log"][-1]["from"], h["log"][-1]["to"]), ("verdict", "refuted", "open"))
+
+    def test_invalidation_withdraws_and_recomputes(self):
+        d = self.d
+        self.ok("verdict", d["r"], d["h"], "supported", "--basis", "b")
+        e2, _ = self.new_exp(d["h"], result=False)
+        r2 = self.ok("result", e2, "r2", "--verdict", d["h"], "refuted", "b2", today="2026-10-29")
+        self.assertEqual((self.show(d["h"])["status"], self.show(e2)["status"]), ("refuted", "done"))
+        out = self.ok("invalidate", r2, "--reason", "wrong checkpoint", today="2026-10-30")
+        self.assertIn("%s refuted -> supported" % d["h"], out)
+        self.assertIn("%s done -> frozen" % e2, out)
+        self.assertEqual((self.show(d["h"])["status"], self.show(e2)["status"]), ("supported", "frozen"))
+        self.assertEqual(self.show(e2)["log"][-1]["event"], "invalidate")
+        self.ok("invalidate", d["r"], "--reason", "bug")
+        self.assertEqual((self.show(d["h"])["status"], self.show(d["e"])["status"]), ("open", "frozen"))
+        self.assertIn("withdrawn", self.ok("show", d["e"]))
+        r3 = self.ok("result", e2, "rerun", "--verdict", d["h"], "refuted", "b3")  # not a replacement now
+        self.assertEqual((self.show(d["h"])["status"], self.show(e2)["status"]), ("refuted", "done"))
+        self.assertTrue(r3)
+
+    def test_superseded_hypothesis_ignores_verdicts(self):
+        d = self.d
+        self.add("hypothesis", "H2", "--prediction", "p", "--link", "addresses:" + d["q"], "--link", "supersedes:" + d["h"])
+        self.ok("verdict", d["r"], d["h"], "supported", "--basis", "b")
+        self.assertEqual(self.show(d["h"])["status"], "superseded")
+        self.assertEqual(self.show(d["e"])["status"], "done")
+
+    def test_confirm_also_is_a_status_event(self):
+        d = self.d
+        c = self.concl(d["r"], "--link", "supports:" + d["h"], "--link", "answers:" + d["q"], author="claude")
+        fo = {f["id"]: f["to"] for f in self.show(c)["follow_ons"]}
+        self.assertEqual(fo, {d["h"]: "supported", d["q"]: "answered"})
+        self.assertIn("follow-ons", self.ok("show", c))
+        self.audit(c)
+        self.assertIn("not a follow-on", self.fails("confirm", c, "--also", d["g"]))
+        self.assertEqual(self.show(c)["status"], "pending")
+        out = self.ok("confirm", c, "--also", d["h"], "--also", d["q"])
+        self.assertIn("%s open -> supported" % d["h"], out)
+        self.assertEqual((self.show(d["h"])["status"], self.show(d["q"])["status"]), ("supported", "answered"))
+        ev = self.show(d["h"])["log"][-1]
+        self.assertEqual((ev["event"], ev["to"], ev["reason"]), ("confirm-also", "supported", "by " + c))
+        e2, _ = self.new_exp(d["h"], result=False)
+        r2 = self.ok("result", e2, "r2", "--verdict", d["h"], "refuted", "b", today="2026-10-29")
+        self.assertEqual(self.show(d["h"])["status"], "refuted")
+        self.ok("invalidate", r2, "--reason", "bug", today="2026-10-29")
+        self.assertEqual(self.show(d["h"])["status"], "supported")  # the confirm --also event remains
+
+    def test_retro_verdict_marked(self):
+        d = self.d
+        e, r = self.new_exp(d["h"], retro=True)
+        self.ok("verdict", r, d["h"], "refuted", "--basis", "b")
+        self.assertIn("[retro]", [l for l in self.ok("show", e).splitlines() if "refuted on" in l][0])
+        self.assertIn("[retro]", self.ok("brief", r).splitlines()[2])
+
+
+class TestReview(SnapCase):
+    def test_confirm_writes_reviews_reject_does_not(self):
+        d = self.d
+        r2 = self.ok("result", d["e"], "second")
+        c = self.concl(d["r"], "--from", r2, author="claude")
+        self.assertEqual(self.show(d["r"])["review"], "pending: " + c)
+        self.assertNotIn("reviews", self.show(d["r"]))
+        self.confirm(c)
+        for r in (d["r"], r2):
+            rv = self.show(r)["reviews"]
+            self.assertEqual(rv, [{"date": TODAY, "author": "user", "kind": "confirmed", "by": c}])
+            self.assertEqual(self.show(r)["review"], "reviewed: " + c)
+        r3 = self.ok("result", d["e"], "third")
+        c2 = self.concl(r3, author="claude", title="C2")
+        self.ok("reject", c2, "--reason", "no")
+        self.assertNotIn("reviews", self.show(r3))
+
+    def test_user_authored_add_reviews_at_once(self):
+        d = self.d
+        r2 = self.ok("result", d["e"], "second")
+        c = self.concl(d["r"])
+        lead = self.add("lead", "L", "--rationale", "r", "--from", r2)
+        self.assertEqual(self.show(d["r"])["reviews"][0]["by"], c)
+        self.assertEqual(self.show(r2)["reviews"][0]["by"], lead)
+
+    def test_nothing_yet(self):
+        d = self.d
+        r2 = self.ok("result", d["e"], "second")
+        out = self.ok("nothing-yet", d["r"], r2, "--note", "want the villin run first")
+        self.assertIn("reviewed %s: nothing yet" % d["r"], out)
+        rv = self.show(r2)["reviews"]
+        self.assertEqual(rv, [{"date": TODAY, "author": "user", "kind": "nothing-yet", "note": "want the villin run first"}])
+        self.assertEqual(self.show(d["r"])["review"], "reviewed: nothing yet")
+        ri = self.ok("result", d["e"], "partial", "--interim")
+        self.assertIn("interim", self.fails("nothing-yet", ri))
+        self.ok("invalidate", r2, "--reason", "bug")
+        self.fails("nothing-yet", r2)
+        self.concl(d["r"])  # a result marked nothing yet can still back a conclusion
+        self.assertEqual(self.show(d["r"])["reviews"][-1]["kind"], "confirmed")
+
+    def test_review_durable_after_supersession_and_refutation(self):
+        d = self.d
+        r2 = self.ok("result", d["e"], "second")
+        c1 = self.concl(d["r"])
+        self.concl(r2, "--link", "supersedes:" + c1, title="Newer")
+        self.assertEqual(self.show(c1)["status"], "superseded")
+        self.assertEqual(self.show(d["r"])["review"], "reviewed: " + c1)
+        lead = self.add("lead", "L", "--rationale", "r", "--from", r2)
+        self.ok("status", lead, "dropped", "--reason", "no")
+        self.assertTrue(self.show(r2)["reviews"])
+        self.assertNotIn(d["r"], [b["id"] for b in json.loads(self.ok("gate", "--json"))["blockers"]])
+
+    def test_reviews_and_interim_fixed(self):
+        d = self.d
+        for f in ("reviews", "interim"):
+            self.fails("set", d["r"], f, "x")
+
+
+class TestOriginAndAudit(SnapCase):
+    def test_origin_required_for_claude_drafts(self):
+        d = self.d
+        base = ["--rationale", "why", "--scope", "here", "--alternatives", "none", "--from", d["r"]]
+        self.assertIn("--origin", self.fails("add", "conclusion", "C", *base, author="claude"))
+        self.assertIn("--user-words", self.fails("add", "conclusion", "C", *base, "--origin", "user", author="claude"))
+        self.assertIn("--origin", self.fails("add", "lead", "L", "--rationale", "r", "--from", d["r"], author="claude"))
+        self.fails("add", "conclusion", "C", *base, "--origin", "maybe", author="claude")
+        c = self.add("conclusion", "C", *base, "--origin", "user", "--user-words", "-", author="claude",
+                     input="run 19 looks no better than run 18 to me\n")
+        n = self.show(c)
+        self.assertEqual((n["origin"], n["user_words"]), ("user", "run 19 looks no better than run 18 to me"))
+        self.assertIn("the user's read", self.ok("show", c))
+        for f in ("origin", "user_words"):
+            self.fails("set", c, f, "claude")
+        self.assertNotIn("origin", self.show(self.concl(d["r"], title="User's own")))  # user-authored: neither needed
+        self.fails("add", "goal", "G", "--origin", "user")  # not a conclusion or lead
+
+    def test_older_nodes_without_origin_stay_valid(self):
+        d = self.d
+        c = self.concl(d["r"], author="claude")
+        self.edit_ref(lambda n, m: n[c].pop("origin"))
+        self.assertEqual(self.lint_msgs()[0], 0)
+
+    def test_audit_before_confirm(self):
+        d = self.d
+        c = self.concl(d["r"], author="claude")
+        self.assertIn("no audit", self.fails("confirm", c))
+        a1 = self.audit(c, "concerns", "scope too broad")
+        self.ok("set", c, "scope", "chignolin only")
+        err = self.fails("confirm", c)
+        self.assertIn("not current", err)
+        self.assertIn("scope", err)
+        self.assertIn("(stale)", self.ok("pending"))
+        a2 = self.audit(c)
+        self.ok("set", c, "tags", "t", "--append")  # tags, refs and log do not make an audit stale
+        self.ok("set", c, "refs", "foam-1")
+        self.assertEqual(self.show(c)["latest_audit"]["id"], a2)
+        self.ok("confirm", c)
+        self.assertTrue(a1)
+
+    def test_latest_audit_only_and_leads(self):
+        d = self.d
+        lead = self.add("lead", "L", "--rationale", "r", "--from", d["r"], author="claude")
+        self.fails("confirm", lead)
+        self.audit(lead, "unsound", "bad")
+        self.assertLint("warn", lead, "unsound")
+        self.audit(lead, "sound", "fine")
+        self.assertNoLint(lead, "unsound")
+        self.ok("confirm", lead)
+        self.assertEqual(self.show(d["r"])["reviews"][0]["by"], lead)
+        self.fails("add", "audit", "A", "--of", d["h"], "--verdict", "sound", "--findings", "x")
+
+    def test_switch_off_and_other_types(self):
+        d = self.d
+        g2 = self.add("goal", "G2", author="claude")
+        self.ok("confirm", g2)  # only conclusions and leads need an audit
+        c = self.concl(d["r"], author="claude")
+        self.ok("config", "set", "audit_before_confirm", "false")
+        self.ok("confirm", c)
+
+
+class TestFreezeGate(SnapCase):
+    def draft(self, title="Next"):
+        e = self.add("experiment", title, "--spec", "S", "--exec", "command")
+        self.predict(e, self.d["h"])
+        return e
+
+    def blockers(self):
+        return {b["id"]: b["why"] for b in json.loads(self.ok("gate", "--json"))["blockers"]}
+
+    def test_off_by_default_but_reported(self):
+        d = self.d
+        g = json.loads(self.ok("gate", "--json"))
+        self.assertEqual((g["freeze_gate"], g["blocked"]), (False, False))
+        self.assertEqual(set(self.blockers()), {d["e"], d["r"]})
+        self.assertIn("freeze_gate is off", self.ok("gate"))
+        self.ok("freeze", self.draft())
+
+    def test_gate_conditions(self):
+        d = self.d
+        self.ok("config", "set", "freeze_gate", "true")
+        e2 = self.draft()
+        err = self.fails("freeze", e2)
+        self.assertIn("freeze gate", err)
+        self.assertIn(d["r"] + " ", err)
+        self.assertIn("summary of facts", err)  # listed with title
+        self.assertIn(d["e"] + " ", err)
+        self.assertIn("no verdict for " + d["h"], err)
+        self.assertTrue(json.loads(self.ok("gate", "--json"))["blocked"])
+        self.assertIn("blocked", self.ok("gate"))
+        self.ok("verdict", d["r"], d["h"], "supported", "--basis", "b")  # verdict: experiment closes
+        self.assertEqual(set(self.blockers()), {d["r"]})
+        self.ok("nothing-yet", d["r"])  # review: result closes
+        self.assertEqual(self.blockers(), {})
+        self.assertIn("clear", self.ok("gate"))
+        self.ok("freeze", e2)
+
+    def test_parallel_and_interim_do_not_block(self):
+        d = self.d
+        self.ok("verdict", d["r"], d["h"], "supported", "--basis", "b")
+        self.ok("nothing-yet", d["r"])
+        self.ok("config", "set", "freeze_gate", "true")
+        e2 = self.draft("Parallel")
+        self.ok("freeze", e2)  # frozen, no results yet: running in parallel
+        ri = self.ok("result", e2, "first batch", "--interim")
+        self.ok("freeze", self.draft("Third"))
+        self.assertEqual(self.blockers(), {})
+        self.assertNoLint(e2, "interim", today="2026-11-04")
+        self.assertLint("warn", e2, "only interim results", today="2026-11-05")
+        closing = sections(self.ok("prime", today="2026-11-05")).get("Needs closing", [])
+        self.assertIn(e2, "\n".join(closing))
+        self.assertTrue(ri)
+
+    def test_abandoned_experiment_result_still_needs_review(self):
+        d = self.d
+        self.ok("status", d["e"], "abandoned", "--reason", "dead end")
+        self.ok("config", "set", "freeze_gate", "true")
+        self.assertEqual(set(self.blockers()), {d["r"]})  # no verdict needed, a review is
+        self.fails("freeze", self.draft())
+
+    def test_freeze_prints_id_and_title(self):
+        e2 = self.draft("Run 19")
+        out, err = nb_full(self, "freeze", e2)
+        self.assertEqual(out, e2)
+        self.assertIn("frozen %s: Run 19" % e2, err)
+        out, err = nb_full(self, "add", "goal", "Another goal")
+        self.assertRegex(out, ID_RE % "goal")
+        self.assertEqual(err.strip(), "added goal %s: Another goal" % out)
+
+
+class TestBrief(SnapCase):
+    def build(self):
+        d = self.d
+        b = {}
+        self.ok("set", d["r"], "tags", "villin", "--append")
+        b["e2"] = self.add("experiment", "Run 2", "--spec", "S", "--exec", "command", "--link", "variant-of:" + d["e"])
+        self.predict(b["e2"], d["h"])
+        self.ok("freeze", b["e2"])
+        b["r2"] = self.ok("result", b["e2"], "Run 2 result", "--verdict", d["h"], "supported", "m 0.9 > 0.5",
+                          today="2026-10-29")
+        b["e3"] = self.add("experiment", "Run 3", "--spec", "S", "--exec", "command", "--link", "variant-of:" + b["e2"])
+        self.predict(b["e3"], d["h"])
+        self.ok("freeze", b["e3"])
+        b["r3"] = self.ok("result", b["e3"], "Run 3 result", today="2026-10-30")
+        b["q2"] = self.add("question", "Other question?", "--link", "refines:" + d["g"])
+        b["x"] = self.add("exploration", "Look at run 1", "--spec", "S", "--exec", "analysis",
+                          "--link", "investigates:" + b["q2"], "--link", "uses:" + d["r"])
+        self.ok("freeze", b["x"])
+        b["rx"] = self.ok("result", b["x"], "Exploration finding", today="2026-10-29")
+        b["h2"] = self.add("hypothesis", "H2", "--prediction", "p", "--link", "addresses:" + d["q"])
+        b["e4"] = self.add("experiment", "Sibling", "--spec", "S", "--exec", "command")
+        self.predict(b["e4"], b["h2"])
+        self.ok("freeze", b["e4"])
+        b["r4"] = self.ok("result", b["e4"], "Sibling result")
+        b["r7"] = self.ok("result", b["e4"], "Bad sibling result")
+        self.ok("invalidate", b["r7"], "--reason", "bug")
+        b["r8"] = self.ok("result", b["e4"], "Partial sibling", "--interim", today="2026-10-29")
+        b["h3"] = self.add("hypothesis", "H3", "--prediction", "p", "--link", "addresses:" + b["q2"])
+        b["e5"] = self.add("experiment", "Far away", "--spec", "S", "--exec", "command")
+        self.predict(b["e5"], b["h3"])
+        self.ok("freeze", b["e5"])
+        b["r5"] = self.ok("result", b["e5"], "Unrelated words entirely", "--tag", "villin")
+        b["r6"] = self.ok("result", b["e5"], "Another summary of facts")
+        b["r9"] = self.ok("result", b["e5"], "Nothing in common")
+        return b
+
+    def test_tiers(self):
+        d = self.d
+        b = self.build()
+        c = self.concl(b["r2"], author="claude")
+        self.ok("nothing-yet", b["r4"])
+        data = json.loads(self.ok("brief", d["r"], "--json"))
+        tiers = [[it["id"] for it in t["items"]] for t in data["tiers"]]
+        self.assertEqual(tiers[0], [b["r2"], b["r3"], b["rx"]])  # chain order first, then uses
+        self.assertEqual(tiers[1], [b["r8"], b["r4"]])  # same question; invalidated r7 left out
+        self.assertEqual(tiers[2], [b["r6"], b["r5"]])  # two shared tokens rank above one shared tag
+        self.assertNotIn(b["r9"], json.dumps(data))
+        self.assertEqual([x["id"] for x in data["claims"]], [c])
+        self.assertEqual([x["id"] for x in data["open_questions"]], [d["q"]])
+        text = self.ok("brief", d["r"])
+        lines = text.splitlines()
+        self.assertTrue(lines[0].startswith("# Brief: %s  summary of facts" % d["r"]))
+        line = lambda k: [l for l in lines if l.startswith(k)][0]
+        self.assertIn("%s supported: m 0.9 > 0.5" % d["h"], line(b["r2"]))
+        self.assertIn("pending: " + c, line(b["r2"]))
+        self.assertIn("unreviewed", line(b["r3"]))
+        self.assertIn("reviewed: nothing yet", line(b["r4"]))
+        self.assertIn("interim", line(b["r8"]))
+        self.assertIn("shares: villin", line(b["r5"]))
+        self.assertIn("shares: facts, summary", line(b["r6"]))
+        for h in ("## Directly linked", "## Same question (%s: Question?)" % d["q"], "## Possibly related, not linked",
+                  "## Conclusions and leads on these results", "## Open questions"):
+            self.assertIn(h, lines)
+
+    def test_caps_and_all_and_determinism(self):
+        d = self.d
+        b = self.build()
+        self.ok("config", "set", "brief_tier_limit", "1")
+        self.ok("config", "set", "brief_related_limit", "1")
+        text = self.ok("brief", d["r"])
+        self.assertEqual(text, self.ok("brief", d["r"]))
+        self.assertEqual(text.count("(+2 more: nb brief %s --all)" % d["r"]), 1)  # tier 2: r2 shown, r3 and rx not
+        self.assertIn("(+1 more: nb brief %s --all)" % d["r"], text)
+        everything = self.ok("brief", d["r"], "--all")
+        self.assertNotIn("more:", everything)
+        for k in ("r2", "r3", "rx", "r4", "r8", "r5", "r6"):
+            self.assertIn(b[k], everything)
+
+    def test_interim_and_invalidated_say_so(self):
+        b = self.build()
+        self.assertIn("interim", self.ok("brief", b["r8"]).splitlines()[0])
+        self.assertIn("invalidated", self.ok("brief", b["r7"]).splitlines()[0])
+        self.assertIn("verdict %s supported" % self.d["h"], self.ok("brief", b["r2"]))
+
+
+class TestAuditBundle(SnapCase):
+    def test_bundle_contents(self):
+        d = self.d
+        r2 = self.ok("result", d["e"], "uncited result")
+        self.ok("deviate", d["e"], "ran 3 seeds not 5")
+        h2 = self.add("hypothesis", "H2", "--prediction", "p", "--link", "addresses:" + d["q"])
+        c = self.concl(d["r"], "--link", "answers:" + d["q"], "--origin", "user", "--user-words", "it fails on villin",
+                       author="claude", today="2026-10-29")
+        other = self.concl(d["r"], title="Other reading")
+        e2, _ = self.new_exp(h2, result=False)
+        late = self.ok("result", e2, "later result under the same question", today="2026-10-30")
+        old = self.ok("result", e2, "old", today="2026-10-01")
+        b = json.loads(self.ok("audit", c, "--json"))
+        self.assertEqual((b["node"]["id"], b["node"]["origin"], b["node"]["user_words"]), (c, "user", "it fails on villin"))
+        self.assertEqual([r["id"] for r in b["cited_results"]], [d["r"]])
+        self.assertEqual(b["cited_results"][0]["summary"], "summary of facts")
+        self.assertIn("provenance", b["cited_results"][0])
+        ex = b["experiments"][0]
+        self.assertEqual(ex["id"], d["e"])
+        self.assertEqual(ex["predictions"][0]["decision_rule"], "r")
+        self.assertEqual(ex["deviations"][0]["text"], "ran 3 seeds not 5")
+        self.assertEqual([r["id"] for r in b["uncited_results"]], [r2])
+        self.assertEqual([r["id"] for r in b["results_since"]], [late])
+        self.assertNotIn(old, json.dumps(b["results_since"]))
+        self.assertIn(other, [x["id"] for x in b["other_claims"]])
+        self.assertIn(d["r"], b["possibly_related"])
+        text = self.ok("audit", c)
+        self.assertTrue(text.startswith("# Audit bundle: " + c))
+        self.assertIn("## Results it rests on", text)
+        self.assertIn("frozen spec", text)
+        lead = self.add("lead", "L", "--rationale", "r", "--from", d["r"])
+        self.assertEqual(json.loads(self.ok("audit", lead, "--json"))["node"]["id"], lead)
+        self.fails("audit", d["h"])
+
+
+class TestClosingLint(SnapCase):
+    def test_verdict_on_interim_or_foreign_result_is_error(self):
+        d = self.d
+        ri = self.ok("result", d["e"], "partial", "--interim")
+        v = {"hypothesis": d["h"], "verdict": "supported", "result": ri, "basis": "b", "date": TODAY, "author": "user"}
+        self.edit_ref(lambda n, m: n[d["e"]].setdefault("verdicts", []).append(v))
+        self.assertEqual(self.assertLint("error", d["e"], "interim result"), 1)
+        self.reset()
+        e2, r2 = self.new_exp(d["h"])
+        v = dict(v, result=r2)
+        self.edit_ref(lambda n, m: n[d["e"]].setdefault("verdicts", []).append(v))
+        self.assertLint("error", d["e"], "did not produce")
+
+    def test_done_without_verdict_warns(self):
+        d = self.d
+        self.edit_ref(lambda n, m: n[d["e"]].update(status="done"))
+        self.assertEqual(self.assertLint("warn", d["e"], "no current verdict"), 0)
+        self.ok("verdict", d["r"], d["h"], "supported", "--basis", "b")  # backfill
+        self.assertNoLint(d["e"], "no current verdict")
+
+    def test_unreviewed_age(self):
+        d = self.d
+        self.assertNoLint(d["r"], "unreviewed", today="2026-11-04")
+        self.assertLint("warn", d["r"], "unreviewed for 8 days", today="2026-11-05")
+        self.ok("nothing-yet", d["r"])
+        self.assertNoLint(d["r"], "unreviewed", today="2026-11-05")
+
+
+class TestClosingPrime(SnapCase):
+    def test_awaiting_shows_origin_and_audit(self):
+        d = self.d
+        c = self.concl(d["r"], "--origin", "user", "--user-words", "w", author="claude")
+        self.audit(c)
+        c2 = self.concl(d["r"], author="claude", title="Mine")
+        s = sections(self.ok("prime"))
+        aw = "\n".join(s["Awaiting the user (pending, not established)"])
+        line = lambda k: [l for l in aw.splitlines() if l.startswith(k)][0]
+        self.assertIn("from your read, audit sound", line(c))
+        self.assertIn("Claude's read, not audited", line(c2))
+        self.assertIn(d["r"], "\n".join(s["Needs closing"]))
+        self.assertIn("pending: ", self.ok("show", d["r"]))
+
+    def test_concerns_on_supported_conclusion_shown(self):
+        d = self.d
+        c = self.concl(d["r"], "--confidence", "low")
+        self.audit(c, "concerns", "overclaims")
+        self.assertIn("audit concerns", "\n".join(sections(self.ok("prime"))["Recent conclusions"]))
+
+    def test_needs_closing_oldest_first(self):
+        d = self.d
+        r2 = self.ok("result", d["e"], "later", today="2026-10-30")
+        lines = sections(self.ok("prime", today="2026-10-30"))["Needs closing"]
+        ids = [l.split()[0] for l in lines]
+        self.assertEqual(ids, [d["e"], d["r"], r2])
+        self.assertIn("verdict missing", lines[0])
+
+
+class TestClosingSync(NbCase):
+    two_clones = TestSync.two_clones  # borrowed, not inherited, so TestSync's tests do not run twice
+
+    def shared_experiment(self):
+        """Both clones hold an experiment predicting h1 and h2, with result r."""
+        B = self.two_clones()
+        self.h1 = self.add("hypothesis", "H1", "--prediction", "p", "--link", "addresses:" + self.q)
+        self.h2 = self.add("hypothesis", "H2", "--prediction", "p", "--link", "addresses:" + self.q)
+        self.e = self.add("experiment", "E", "--spec", "S", "--exec", "command")
+        self.predict(self.e, self.h1)
+        self.predict(self.e, self.h2)
+        self.ok("freeze", self.e)
+        self.r = self.ok("result", self.e, "res")
+        self.ok("sync")
+        self.ok_in(B, "sync")
+        return B
+
+    def test_verdicts_and_reviews_merge(self):
+        B = self.shared_experiment()
+        self.ok("verdict", self.r, self.h1, "supported", "--basis", "a")
+        self.ok("nothing-yet", self.r, "--note", "A")
+        self.ok_in(B, "verdict", self.r, self.h2, "refuted", "--basis", "b")
+        self.ok_in(B, "nothing-yet", self.r, "--note", "B")
+        self.ok("sync")
+        self.ok_in(B, "sync")
+        self.ok("sync")
+        for repo in (self.repo, B):
+            e = json.loads(self.ok_in(repo, "show", self.e, "--json"))
+            self.assertEqual(sorted(v["hypothesis"] for v in e["verdicts"]), sorted([self.h1, self.h2]))
+            self.assertEqual(e["status"], "done")  # neither side was done; recomputed from the merged graph
+            notes = [x["note"] for x in json.loads(self.ok_in(repo, "show", self.r, "--json"))["reviews"]]
+            self.assertEqual(sorted(notes), ["A", "B"])
+            self.assertEqual(json.loads(self.ok_in(repo, "show", self.h2, "--json"))["status"], "refuted")
+        self.assertEqual([i for i in json.loads(self.ok_in(B, "lint", "--json")) if i["level"] == "error"], [])
+
+    def test_same_hypothesis_verdict_conflict(self):
+        B = self.shared_experiment()
+        self.ok("verdict", self.r, self.h1, "supported", "--basis", "a")
+        self.ok_in(B, "verdict", self.r, self.h1, "refuted", "--basis", "b")
+        self.ok("sync")
+        before = self.head(repo=B)
+        rc, out, err = self.nb_in(B, "sync")
+        self.assertEqual(rc, 1)
+        self.assertIn("both sides added a verdict for " + self.h1, err)
+        self.assertEqual(self.head(repo=B), before)
+
+    def test_hypothesis_status_recomputed_not_conflicting(self):
+        B = self.two_clones()
+        h = self.add("hypothesis", "H", "--prediction", "p", "--link", "addresses:" + self.q)
+        ea = self.add("experiment", "EA", "--spec", "S", "--exec", "command")
+        eb = self.add("experiment", "EB", "--spec", "S", "--exec", "command")
+        for e in (ea, eb):
+            self.predict(e, h)
+            self.ok("freeze", e)
+        self.ok("sync")
+        self.ok_in(B, "sync")
+        self.ok("result", ea, "a", "--verdict", h, "supported", "a", today="2026-10-28")
+        self.ok_in(B, "result", eb, "b", "--verdict", h, "refuted", "b", today="2026-10-29")
+        self.ok("sync")
+        self.ok_in(B, "sync", today="2026-10-29")
+        self.ok("sync")
+        for repo in (self.repo, B):
+            self.assertEqual(json.loads(self.ok_in(repo, "show", h, "--json"))["status"], "refuted")
+
+    def test_fixed_fields_cannot_differ(self):
+        B = self.shared_experiment()
+        self.edit_ref(lambda n, m: n[self.r].update(interim=True))
+        self.edit_ref(lambda n, m: n[self.e].update(title=n[self.e]["title"]), repo=B)  # B moves on too
+        self.edit_ref(lambda n, m: n[self.q].update(body="b side"), repo=B)
+        self.edit_ref(lambda n, m: n[self.r].update(tags=["b"]), repo=B)
+        self.ok("sync")
+        rc, out, err = self.nb_in(B, "sync")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("interim is fixed at creation", err)
 
 
 GATE = HERE.parent / "hooks" / "gate.py"

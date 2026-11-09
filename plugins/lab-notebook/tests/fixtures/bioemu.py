@@ -12,7 +12,9 @@ Source project (read-only): /media/volume/md-data/projects/bioemu-kinetics
 The notebook holds many more entries than are modelled here (68 nodes were kept; see
 FIT_NOTES for what was left out). Every step obeys the SPEC write rules in a realistic order:
 freeze before result, conclusions only from experiment results, user confirm for Claude-authored
-goals/conclusions/leads/decisions, hypothesis/question verdicts only after a supported conclusion.
+goals/conclusions/leads/decisions (each Claude-authored conclusion/lead audited first and given
+--origin claude), hypothesis verdicts given on the result that decides them (hypothesis status and
+experiment done are derived), questions marked answered after the conclusion.
 State at the end: 2026-10-28.
 """
 # Each step: (name, author, date, argv). name: symbolic handle for steps that create a node, else None.
@@ -70,10 +72,11 @@ STEPS = [
         "--run-dir", "runs/cln025/hard_prior_synthetic",
         "--artifact", "runs/cln025/hard_prior_synthetic/results.csv",
         "--artifact", "runs/cln025/hard_prior_synthetic/errors_vs_md.png",
-        "--commit", "7496cef"]),
-    (None, "claude", "2026-10-15", ["status", "{E_hard}", "done"]),
+        "--commit", "7496cef",
+        "--verdict", "{H_hard}", "refuted", "md_only matches or beats bioemu_pi in every budget cell; infinite-data MFPT unfolded to folded 180 ns vs 297 ns; rule: supported only if bioemu_pi beats md_only at small budgets and converges"]),
     ("C_hard", "claude", "2026-10-15", ["add", "conclusion",
         "A hard BioEmu pi has a bias floor on chignolin (folding MFPTs 25-40% too fast, M0 about 4x under-weighted) and can invent sticky states",
+        "--origin", "claude",
         "--tag", "hard-prior", "--tag", "chignolin",
         "--rationale", "With enough MD, bioemu_pi converges to biased values while md_only converges to the truth; md_only matches or beats bioemu_pi in every cell. Also, at finite data a microstate that BioEmu overweights becomes artificially sticky, so t1 under a hard prior is not the folding timescale. Same-day comparison (2026-10-15 'Does BioEmu reach the reference states') gave M0 0.004 vs 0.017.",
         "--scope", "Chignolin only; synthetic Markovian MD from the authors' own MSM; segments seeded from BioEmu's distribution (already near equilibrium); lag 20 ns",
@@ -82,11 +85,12 @@ STEPS = [
         "--from", "{R_hard}",
         "--link", "answers:{Q_hard}", "--link", "contradicts:{H_hard}",
         "--body", "Tentative conclusions of the 2026-10-15 entry."]),
+    ("AUD_C_hard", "claude", "2026-10-15", ["add", "audit", "Audit of {C_hard}", "--of", "{C_hard}", "--verdict", "sound", "--findings", "No failed checks (backfilled audit)", "--auditor", "nb-auditor/sonnet"]),
     (None, "user", "2026-10-15", ["confirm", "{C_hard}"]),
-    (None, "claude", "2026-10-15", ["status", "{H_hard}", "refuted"]),
     (None, "claude", "2026-10-15", ["status", "{Q_hard}", "answered"]),
     ("L_seed", "claude", "2026-10-15", ["add", "lead",
         "Seeding every segment from one unfolded microstate is where a pi prior should help",
+        "--origin", "claude",
         "--tag", "hard-prior",
         "--rationale", "The synthetic grid seeds from BioEmu's own distribution, so md_only already gets good populations from the starts; an off-equilibrium seed (the 'single' mode) is the untested regime where the prior could pay off.",
         "--from", "{R_hard}",
@@ -125,8 +129,8 @@ STEPS = [
         "--run-dir", "runs/cln025/transition_detector",
         "--artifact", "runs/cln025/transition_detector/sweep.csv",
         "--artifact", "runs/cln025/transition_detector/summary.json",
-        "--commit", "895f888"]),
-    (None, "claude", "2026-10-17", ["status", "{E_plat}", "done"]),
+        "--commit", "895f888",
+        "--verdict", "{H_det}", "refuted", "best recall 0.44 at precision 0.92 (TIC1-4: recall 0.72 at precision 0.29); rule: recall well above 0.5 at precision near 0.9"]),
     ("E_fe", "claude", "2026-10-17", ["add", "experiment",
         "Picking transition windows by free-energy thresholding on chignolin",
         "--tag", "detector", "--tag", "chignolin", "--retro",
@@ -145,18 +149,19 @@ STEPS = [
         "--run-dir", "runs/cln025/free_energy_intervals",
         "--artifact", "runs/cln025/free_energy_intervals/sweep.csv",
         "--artifact", "runs/cln025/free_energy_intervals/summary.json",
-        "--commit", "174ddd5"]),
-    (None, "claude", "2026-10-17", ["status", "{E_fe}", "done"]),
+        "--commit", "174ddd5",
+        "--verdict", "{H_det}", "refuted", "recall 0.60 at precision 0.88, and only after a label-based basin check (0.11 before); rule: recall well above 0.5 at precision near 0.9 without macrostate labels"]),
     ("C_det", "claude", "2026-10-17", ["add", "conclusion",
         "Neither a TICA-plateau nor a free-energy detector recovers more than about 60% of chignolin transitions, and the free-energy one needs macrostate labels for its precision",
+        "--origin", "claude",
         "--tag", "detector", "--tag", "chignolin",
         "--rationale", "Best recall 0.44 (plateau, precision 0.92) and 0.60 (free energy, precision 0.88 only after a label-based basin check; 0.11 before it). M1 and M2 are too close in TIC1-2 for a single distance threshold.",
         "--scope", "Chignolin, 3720 runs of 50 ns, 1205 macrostate-transition events; settings tuned on chignolin, so optimistic for other proteins",
         "--alternatives", "Untested fixes (TIC1 only, kinetic-map scaling, per-protein thresholds, using the run's first frames as the before-basin) might raise recall; some false positives may be real M0 visits that the labels miss",
         "--from", "{R_plat}", "--from", "{R_fe}",
         "--link", "answers:{Q_det}", "--link", "contradicts:{H_det}"]),
+    ("AUD_C_det", "claude", "2026-10-17", ["add", "audit", "Audit of {C_det}", "--of", "{C_det}", "--verdict", "sound", "--findings", "No failed checks (backfilled audit)", "--auditor", "nb-auditor/sonnet"]),
     (None, "user", "2026-10-17", ["confirm", "{C_det}"]),
-    (None, "claude", "2026-10-17", ["status", "{H_det}", "refuted"]),
     (None, "claude", "2026-10-17", ["status", "{Q_det}", "answered"]),
     ("D_core", "user", "2026-10-17", ["add", "decision",
         "Use core-to-core windows from the authors' macrostates (strict cores) as transition windows, not the plateau or free-energy detectors",
@@ -214,10 +219,11 @@ STEPS = [
         "--artifact", "runs/all/endpoint_dependence_multi/summary.csv",
         "--artifact", "runs/all/endpoint_dependence_multi/by_k.csv",
         "--artifact", "runs/all/endpoint_dependence_multi/per_pair.csv",
-        "--commit", "71a4cb3"]),
-    (None, "claude", "2026-10-20", ["status", "{E_multi}", "done"]),
+        "--commit", "71a4cb3",
+        "--verdict", "{H_ep2}", "refuted", "largest peak headroom 0.123 (BBL 3-4) < 0.15 pre-set bound"]),
     ("C_endpt", "claude", "2026-10-20", ["add", "conclusion",
         "At MSM resolution, TPT targets do not depend on exact endpoints beyond the basin pair: peak headroom is at most 0.123, below the pre-set 0.15",
+        "--origin", "claude",
         "--tag", "tpt-endpoint", "--tag", "bba", "--tag", "bbl", "--tag", "proteing",
         "--rationale", "Largest peak 0.123 (BBL 3-4), the other eight pairs 0.025-0.076, against 0.20-0.74 between basin pairs sharing a basin, so which basins matters several times more than which structures.",
         "--scope", "Authors' MSMs with 10-20 ns lag, f = 0.75, barrier-like basin pairs with 50 or more windows on chignolin, BBA, BBL, protein G",
@@ -225,8 +231,8 @@ STEPS = [
         "--from", "{R_multi}",
         "--link", "contradicts:{H_ep2}",
         "--body", "Deliberately does not answer Q_endpt: only the MSM-level reading is settled (project_guide section 7, item 8)."]),
+    ("AUD_C_endpt", "claude", "2026-10-20", ["add", "audit", "Audit of {C_endpt}", "--of", "{C_endpt}", "--verdict", "sound", "--findings", "No failed checks (backfilled audit)", "--auditor", "nb-auditor/sonnet"]),
     (None, "user", "2026-10-20", ["confirm", "{C_endpt}"]),
-    (None, "claude", "2026-10-20", ["status", "{H_ep2}", "refuted"]),
 
     # ------------------------------------------------------------------ 2026-10-21..23: committor tests
     ("Q_cmt", "claude", "2026-10-21", ["add", "question",
@@ -257,9 +263,11 @@ STEPS = [
     (None, "claude", "2026-10-22", ["status", "{X_cerr}", "done"]),
     ("L_v2", "claude", "2026-10-22", ["add", "lead",
         "A second committor test with transition-path starts, 32 rollouts per start, an MD-matched horizon and baselines would resolve what v1 could not",
+        "--origin", "claude",
         "--tag", "committor",
         "--rationale", "v1 had censored rollouts (888 of the chignolin rollouts never committed), a median of about 20 outcomes per microstate, only 2-5 in the q_md 0.2-0.4 bins, cores defined from the reference and no baseline.",
         "--from", "{R_cerr}"]),
+    ("AUD_L_v2", "claude", "2026-10-22", ["add", "audit", "Audit of {L_v2}", "--of", "{L_v2}", "--verdict", "sound", "--findings", "No failed checks (backfilled audit)", "--auditor", "nb-auditor/sonnet"]),
     (None, "user", "2026-10-22", ["confirm", "{L_v2}"]),
     ("E_cmt2", "claude", "2026-10-22", ["add", "experiment",
         "Committor test v2: BioEmu2 rollouts from MD transition-path frames vs MD at the same horizon (chignolin, Trp-cage, villin)",
@@ -281,10 +289,11 @@ STEPS = [
         "--artifact", "runs/cln025/committor_v2/eval/summary.json",
         "--artifact", "runs/trpcage/committor_v2/eval/summary.json",
         "--artifact", "runs/villin/committor_v2/eval/summary.json",
-        "--commit", "3faca8b"]),
-    (None, "claude", "2026-10-23", ["status", "{E_cmt2}", "done"]),
+        "--commit", "3faca8b",
+        "--verdict", "{H_cmt}", "refuted", "Brier skill vs constant -0.29 / -0.28 / -0.28 with CIs excluding 0 (rule: above 0); signed error +0.28 / +0.31 / +0.33 (rule: CI contains 0)"]),
     ("C_v2", "claude", "2026-10-23", ["add", "conclusion",
         "BioEmu2 propagation committors are worse than a constant predictor on chignolin, Trp-cage and villin",
+        "--origin", "claude",
         "--tag", "committor", "--tag", "bioemu2", "--tag", "chignolin", "--tag", "trpcage", "--tag", "villin",
         "--rationale", "Brier skill vs a constant predictor is -0.28 to -0.29 with CIs excluding 0, while the MSM, a TIC1-only logistic and MD split-half are all well above the constant; signed error is +0.28 to +0.33, the step sits at q_md 0.1-0.2 instead of 0.5.",
         "--scope", "Chignolin, Trp-cage, villin; 108 starts each (96 path + 12 core), 32 rollouts, 1 ns steps, T = 30/30/80 ns, f = 0.75, strict-core endpoints",
@@ -292,11 +301,12 @@ STEPS = [
         "--from", "{R_v2}",
         "--link", "answers:{Q_cmt}", "--link", "contradicts:{H_cmt}",
         "--body", "lab_notebook 2026-10-23 'Committor test v2: results'."]),
+    ("AUD_C_v2", "claude", "2026-10-23", ["add", "audit", "Audit of {C_v2}", "--of", "{C_v2}", "--verdict", "sound", "--findings", "No failed checks (backfilled audit)", "--auditor", "nb-auditor/sonnet"]),
     (None, "user", "2026-10-23", ["confirm", "{C_v2}"]),
-    (None, "claude", "2026-10-23", ["status", "{H_cmt}", "refuted"]),
     (None, "claude", "2026-10-23", ["status", "{Q_cmt}", "answered"]),
     ("C_sticky", "claude", "2026-10-23", ["add", "conclusion",
         "BioEmu2 propagation is under-dispersed: too sticky both inside cores and in the uncommitted region",
+        "--origin", "claude",
         "--tag", "committor", "--tag", "bioemu2",
         "--rationale", "Positive control: BioEmu2 does not leave deep cores in 30-80 ns (villin never) while MD leaves 1-8% of the time, and it fails to commit 3-8x as often as MD. Claude's own reading of the v2 numbers, medium confidence.",
         "--scope", "Chignolin, Trp-cage, villin committor v2 controls and 'neither core by T' fractions",
@@ -306,9 +316,11 @@ STEPS = [
         "--body", "Observation 6 of lab_notebook 2026-10-23, written as 'in my reading'. The rejection below is invented to exercise nb reject; the notebook only records the reading."]),
     ("L_bias", "claude", "2026-10-23", ["add", "lead",
         "The v2 folding bias (+0.28 to +0.33, twice v1's +0.15) comes from transition-path starts sitting on the folded side of their microstate",
+        "--origin", "claude",
         "--tag", "committor",
         "--rationale", "Not the MD reference: re-fitting against the unlimited-horizon 0.1 ns q_md moves the step by only 0.02-0.06. Either v2's path frames are folded-side within a microstate, or v1's eyeballed step rested on few outcomes. Untested.",
         "--from", "{R_v2}"]),
+    ("AUD_L_bias", "claude", "2026-10-23", ["add", "audit", "Audit of {L_bias}", "--of", "{L_bias}", "--verdict", "sound", "--findings", "No failed checks (backfilled audit)", "--auditor", "nb-auditor/sonnet"]),
     (None, "user", "2026-10-23", ["confirm", "{L_bias}"]),
     (None, "user", "2026-10-24", ["reject", "{C_sticky}",
         "--reason", "A reading from one positive control, not tested; keep it out of the record until a check exists"]),
@@ -340,8 +352,8 @@ STEPS = [
         "--run-dir", "runs/tse_sampling",
         "--artifact", "runs/tse_sampling/summary.csv",
         "--artifact", "runs/tse_sampling/tse_micro.csv",
-        "--commit", "5efe201"]),
-    (None, "claude", "2026-10-26", ["status", "{E_tse}", "done"]),
+        "--commit", "5efe201",
+        "--verdict", "{H_tse}", "refuted", "BioEmu2 TSE observed / expected 7 / 71 and 2 / 36 on chignolin, 3 / 208 on villin, below the 95% Poisson range of the pi expectation"]),
     ("E_pg", "claude", "2026-10-26", ["add", "experiment",
         "TSE sampling on protein G by BioEmu2 and BioEmu 1 equilibrium ensembles",
         "--tag", "tse-sampling", "--tag", "proteing", "--retro",
@@ -361,18 +373,19 @@ STEPS = [
         "--tag", "tse-sampling", "--tag", "proteing", "--link", "contradicts:{H_tse}",
         "--run-dir", "runs/proteing/bioemu2_equilibrium",
         "--artifact", "runs/tse_sampling/summary.csv",
-        "--commit", "39db14a"]),
-    (None, "claude", "2026-10-27", ["status", "{E_pg}", "done"]),
+        "--commit", "39db14a",
+        "--verdict", "{H_tse}", "refuted", "protein G TSE observed / expected 0 / 297, 0 / 219, 0 / 119 (BioEmu2) and 7 / 292 (BioEmu 1), below the 95% Poisson range"]),
     ("C_tse", "claude", "2026-10-27", ["add", "conclusion",
         "BioEmu2's equilibrium ensemble leaves the q = 0.5 transition states essentially unsampled on chignolin, villin and protein G, and BioEmu 1 is at best partial",
+        "--origin", "claude",
         "--tag", "tse-sampling", "--tag", "bioemu2", "--tag", "bioemu1",
         "--rationale", "BioEmu2 observed / expected is 2-7 of 36-71 on chignolin, 3 of 113-208 on villin and 0 of 36-297 on protein G; BioEmu 1 is 2.6-4.3x the reference on chignolin, 0.4-0.5x on villin and 0.02-0.14x on protein G. The shortfall spans the whole committor range, not only q = 0.5.",
         "--scope", "Chignolin, villin, protein G; 10,000 samples per model; TSE on the authors' 10-20 ns lag MSM committor (smoothed) and on q_md; W = 0.1 and 0.05; BioEmu2 has no Trp-cage ensemble",
         "--alternatives", "Temperature (350 K reference vs undocumented BioEmu2 training temperature) is untested; assignment is by nearest centre, so far-away samples still count somewhere",
         "--from", "{R_tse}", "--from", "{R_pg}",
         "--link", "answers:{Q_tse}", "--link", "contradicts:{H_tse}"]),
+    ("AUD_C_tse", "claude", "2026-10-27", ["add", "audit", "Audit of {C_tse}", "--of", "{C_tse}", "--verdict", "sound", "--findings", "No failed checks (backfilled audit)", "--auditor", "nb-auditor/sonnet"]),
     (None, "user", "2026-10-27", ["confirm", "{C_tse}"]),
-    (None, "claude", "2026-10-27", ["status", "{H_tse}", "refuted"]),
     (None, "claude", "2026-10-27", ["status", "{Q_tse}", "answered"]),
     ("G3", "user", "2026-10-27", ["add", "goal",
         "Condition BioEmu on endpoints and a committor to sample the transition path ensemble",
@@ -402,6 +415,7 @@ STEPS = [
     (None, "user", "2026-10-27", ["status", "{Q_base}", "settled"]),
     ("L_steer", "claude", "2026-10-27", ["add", "lead",
         "BioEmu's own FK/SMC steering toward the endpoints is a baseline for the ControlNet",
+        "--origin", "claude",
         "--tag", "steering",
         "--rationale", "Both BioEmu versions under-sample the TSE, and steering needs no fine-tune; it is a cheap comparison for the conditioned model. The suggested-by link is forced: the idea came from planning the ControlNet, not from these results.",
         "--from", "{R_tse}", "--from", "{R_pg}",
@@ -452,6 +466,7 @@ STEPS = [
     (None, "claude", "2026-10-27", ["status", "{X_prep}", "done"]),
     ("L_tpt", "claude", "2026-10-27", ["add", "lead",
         "Reactive training frames can be generated from the MSM by TPT where MD shows no complete transition",
+        "--origin", "claude",
         "--tag", "data", "--tag", "tpt",
         "--rationale", "Transition-mode training uses only reactive segments observed whole in one MD run, and short adaptive-sampling runs rarely contain them. TPT gives the transition path density pi q+ q- and reactive-path sampling without complete trajectories. Open: what plays the role of the endpoints for a synthetic path.",
         "--from", "{R_prep}",
@@ -484,8 +499,8 @@ STEPS = [
         "--artifact", "runs/tse/villin_holdout/villin/2026-10-27_17-33-11/eval/2026-10-27_20-17-12/metrics.csv",
         "--artifact", "runs/tse/villin_holdout/villin/2026-10-27_17-33-11/eval/2026-10-27_20-17-12/calibration.png",
         "--ext-id", "4tydmwr6", "--ext-id", "0wxpf8pq",
-        "--commit", "ba67aa7"]),
-    (None, "claude", "2026-10-27", ["status", "{E_run1}", "done"]),
+        "--commit", "ba67aa7",
+        "--verdict", "{H7}", "refuted", "corr(q_req, q_real) -0.16 (rule: clearly positive); q_abs_err 0.359 vs ablation 0.370 (rule: clearly below)"]),
     ("X_diag", "claude", "2026-10-27", ["add", "exploration",
         "Diagnose the run-1 ControlNet: sampler check, corrupted-condition loss, reactive occupancy",
         "--tag", "villin", "--tag", "controlnet",
@@ -503,12 +518,15 @@ STEPS = [
     (None, "claude", "2026-10-27", ["status", "{X_diag}", "done"]),
     ("L_pair", "claude", "2026-10-27", ["add", "lead",
         "Training items should carry each transition's own endpoints, and the ControlNet branch should be gated off when conditions are dropped",
+        "--origin", "claude",
         "--rationale", "Diagnostics: the run-1 model learned the q-stratified training marginal unconditionally (conditions dropped gives 0.20 / 0.14 in the cores vs 0.036 / 0.866 for base BioEmu) and corrupting the conditions barely changes the loss. Random core endpoints are independent of the target frame given the pair, so they carry only direction; the branch can lower the loss without using any condition.",
         "--from", "{R_diag}",
         "--tag", "controlnet"]),
+    ("AUD_L_pair", "claude", "2026-10-27", ["add", "audit", "Audit of {L_pair}", "--of", "{L_pair}", "--verdict", "sound", "--findings", "No failed checks (backfilled audit)", "--auditor", "nb-auditor/sonnet"]),
     (None, "user", "2026-10-27", ["confirm", "{L_pair}"]),
     ("C_ignore", "claude", "2026-10-27", ["add", "conclusion",
         "The run-1 ControlNet shows no measurable effect of q or the endpoints on its samples",
+        "--origin", "claude",
         "--tag", "controlnet", "--tag", "villin",
         "--rationale", "Realized q is about 0.5 at every request (corr -0.16, the same as the q-dropped ablation's -0.14); only 29% / 31% of samples land in the requested core at q = 0; the fine-tuned model drifted from base BioEmu's 87% folded to 10-30% in either core. The diagnostics (R_diag, an exploration, listed as context) add that corrupting q or the endpoints changes the loss by at most 0.1% and that the sampler reproduces base BioEmu.",
         "--scope", "Villin holdout, one 30k-step run, batch 32, random core endpoints; one pair so endpoints carry only direction",
@@ -517,8 +535,8 @@ STEPS = [
         "--from", "{R_run1}", "--from", "{R_diag}",
         "--link", "contradicts:{H7}",
         "--body", "The claim of the 2026-10-27 entries ('model ignores q'). Corrected 2026-10-28."]),
+    ("AUD_C_ignore", "claude", "2026-10-27", ["add", "audit", "Audit of {C_ignore}", "--of", "{C_ignore}", "--verdict", "sound", "--findings", "No failed checks (backfilled audit)", "--auditor", "nb-auditor/sonnet"]),
     (None, "user", "2026-10-27", ["confirm", "{C_ignore}"]),
-    (None, "claude", "2026-10-27", ["status", "{H7}", "refuted"]),
 
     # ------------------------------------------------------------------ 2026-10-27/28: run 2
     ("H8", "claude", "2026-10-27", ["add", "hypothesis",
@@ -558,15 +576,16 @@ STEPS = [
         "--artifact", "runs/tse/villin_holdout_transition/villin/2026-10-27_23-18-34/eval/2026-10-28_02-11-30/headline.csv",
         "--artifact", "runs/tse/villin_holdout_transition/villin/2026-10-27_23-18-34/eval/2026-10-28_02-11-30/metrics.csv",
         "--ext-id", "ole9gtij",
-        "--commit", "a31e44b"]),
+        "--commit", "a31e44b",
+        "--verdict", "{H9}", "supported", "endpoints dropped +1.24 +- 0.13 loss increase vs run 1 0.00 (rule: clearly more than 0.00-0.1)"]),
     ("R_qreq", "claude", "2026-10-28", ["result", "{E_run2}",
         "Villin holdout, run 2, 512 samples per q_req, realized q in the requested direction. Share in a core / q_real 0.4-0.6 / q_real 0.3-0.7 / mean |q_real - 0.5|: q_req 0.0: 0.52 / 0.08 / 0.18 / 0.38; 0.2: 0.14 / 0.17 / 0.42 / 0.26; 0.5: 0.13 / 0.13 / 0.33 / 0.29; 0.8: 0.10 / 0.13 / 0.43 / 0.26; 1.0: 0.53 / 0.06 / 0.17 / 0.39; q dropped (any q_req): 0.19-0.24 / 0.09-0.12 / 0.28-0.35 / 0.30-0.32. Realized-q mean 0.48-0.52 in every row for q_req 0.1-0.9. At q_req 0 or 1, 52-53% of samples are in a core, split evenly between both cores. Cosine similarity of the q embeddings at q = 0 and q = 1 is 0.22.",
         "--tag", "controlnet", "--tag", "villin", "--link", "contradicts:{H8}",
         "--run-dir", "runs/tse/villin_holdout_transition/villin/2026-10-27_23-18-34",
         "--artifact", "runs/tse/villin_holdout_transition/villin/2026-10-27_23-18-34/eval/2026-10-28_02-11-30/headline.csv",
         "--ext-id", "ole9gtij",
-        "--commit", "cff4129"]),
-    (None, "claude", "2026-10-28", ["status", "{E_run2}", "done"]),
+        "--commit", "cff4129",
+        "--verdict", "{H8}", "refuted", "realized-q mean 0.48-0.52 for q_req 0.1-0.9; share in q_real 0.4-0.6 0.13 at q_req 0.5, no concentration near the requested q"]),
     (None, "claude", "2026-10-28", ["link", "{R_run2}", "contradicts", "{C_ignore}"]),
     ("AUD", "claude", "2026-10-28", ["add", "audit",
         "Audit of the run-1 claim that the ControlNet ignores q",
@@ -577,6 +596,7 @@ STEPS = [
         "--auditor", "claude (self-review, 2026-10-28)"]),
     ("C6", "claude", "2026-10-28", ["add", "conclusion",
         "Run 1 did not ignore q: q acts without direction in both runs, and only run 2 uses the endpoints",
+        "--origin", "claude",
         "--tag", "controlnet", "--tag", "villin",
         "--rationale", "Both runs show a symmetric |q - 0.5| effect (rho_abs 0.19 and 0.17) and more core mass at q = 0 and 1, while flipping q or swapping the endpoints leaves the loss unchanged in both. Run 2 pays 1.24 loss units when the endpoints are dropped, run 1 0.00.",
         "--scope", "Villin holdout, runs 1 and 2 (30k steps each), checked on Trp-cage for the shuffle pattern",
@@ -584,10 +604,11 @@ STEPS = [
         "--from", "{R_run2}", "--from", "{R_qreq}",
         "--link", "supersedes:{C_ignore}", "--link", "supports:{H9}", "--link", "contradicts:{H7}",
         "--body", "Correction recorded in lab_notebook 2026-10-28 ('Correction to the 2026-10-27 entries'): only the signed rho had been checked."]),
+    ("AUD_C6", "claude", "2026-10-28", ["add", "audit", "Audit of {C6}", "--of", "{C6}", "--verdict", "sound", "--findings", "No failed checks (backfilled audit)", "--auditor", "nb-auditor/sonnet"]),
     (None, "user", "2026-10-28", ["confirm", "{C6}"]),
-    (None, "claude", "2026-10-28", ["status", "{H9}", "supported"]),
     ("C7", "claude", "2026-10-28", ["add", "conclusion",
         "In run 2, q works as a binary core-vs-interior switch, not a coordinate: requesting q = 0.5 does not concentrate samples at the transition state",
+        "--origin", "claude",
         "--tag", "controlnet", "--tag", "villin",
         "--rationale", "Realized-q mean is 0.48-0.52 in every row for q_req 0.1-0.9; the share in q_real 0.4-0.6 is 0.13 at q_req 0.5, the same as at 0.8 and below 0.17 at 0.2. The only effect is at the extremes: 52-53% in a core at q_req 0 or 1, 10-14% for interior requests.",
         "--scope", "Villin holdout, run 2, 512 samples per requested q, MSM committor of the sample microstate",
@@ -596,6 +617,7 @@ STEPS = [
         "--from", "{R_qreq}", "--from", "{R_run2}",
         "--link", "contradicts:{H8}",
         "--body", "So 'use the direction-blind model for the TSE at q_req = 0.5' is not available as is (lab_notebook 2026-10-28, last entry). Awaiting the user."]),
+    ("AUD_L_tpt", "claude", "2026-10-28", ["add", "audit", "Audit of {L_tpt}", "--of", "{L_tpt}", "--verdict", "sound", "--findings", "No failed checks (backfilled audit)", "--auditor", "nb-auditor/sonnet"]),
     (None, "user", "2026-10-28", ["confirm", "{L_tpt}"]),
 ]
 
@@ -680,6 +702,27 @@ NEW, exposed by the revision
   was done by an experiment that does not link back to it except through hypotheses.
 - Retro on E_run1 is true only for the rule; the run itself was launched after freeze in practice, so
   retro may be too coarse (per-prediction flag).
+
+THIRD PASS (verdicts, review, audit)
+- Removed every `status <exp> done` on experiments and every `status <hyp> supported|refuted`; the
+  verdicts now ride on the result steps (--verdict HYP V BASIS). Explorations keep `status done`.
+  Result to verdict: R_hard H_hard; R_plat and R_fe H_det; R_multi H_ep2; R_v2 H_cmt; R_tse and R_pg
+  H_tse; R_run1 H7 (refuted by its own experiment, so no `confirm --also` was needed);
+  R_run2 H9 supported; R_qreq H8 refuted. Question `answered` steps are kept as separate status steps.
+- Basis strings paraphrase the (mostly "[implied]") rules against numbers in the summaries.
+- DIFFERENCE: H8 is now refuted (verdict on R_qreq); before, it stayed open because C7 is still
+  pending. All other hypothesis statuses are unchanged. E_steer stays draft (no result).
+- Every conclusion or lead has --origin claude (the sources record no verbatim user words).
+  Each confirmed one has a backfilled `sound` audit just before its confirm. The existing AUD
+  (concerns on C_ignore, 2026-10-28) is kept and follows the earlier backfilled sound audit.
+  Never-confirmed nodes (C_sticky, C7, L_seed, L_steer) have no audit.
+- Review: all 13 results are reviewed through confirmed conclusions or leads (R_hard C_hard, R_cerr
+  L_v2, R_plat and R_fe C_det, R_multi C_endpt, R_v2 C_v2 and L_bias, R_tse and R_pg C_tse, R_diag
+  L_pair, R_run1 C_ignore, R_run2 and R_qreq C6, R_prep L_tpt). No nothing-yet steps were needed;
+  no results remain unreviewed.
+- Did not fit: H8 is refuted by a verdict before any confirmed conclusion exists (C7 pending), which
+  is stronger than the old state; H_det and H_tse carry two agreeing verdicts from two experiments;
+  the backfilled audits are formal, not real checks.
 """
 
 def build(run):
