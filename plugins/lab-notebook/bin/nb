@@ -2436,6 +2436,18 @@ def cmd_sync(args):
             hyps = [k for k, n in merged.nodes.items() if n["type"] == "hypothesis" and merged.hyp_events(k)]
             exps = [k for k, n in merged.nodes.items() if n["type"] == "experiment" and n.get("status") == "frozen"]
             changes = merged.recompute(hyps, exps, event="sync")
+            # A verdict that was current on one side and is not in the merged graph (the other side
+            # invalidated its result, or replaced it) was withdrawn by the merge: as after
+            # `nb invalidate`, its hypothesis and experiment are re-derived, reopening a done one.
+            for e, n in merged.nodes.items():
+                if n["type"] != "experiment" or not n.get("verdicts"):
+                    continue
+                now = merged.current_verdicts(e)
+                for side in (g_ours, g_theirs):
+                    if e in side.nodes:
+                        for h, v in side.current_verdicts(e).items():
+                            if now.get(h) != v and h in merged.nodes:
+                                rederive.update((h, e))
             changes += merged.recompute([k for k in rederive if merged.type(k) == "hypothesis"],
                                         [k for k in rederive if merged.type(k) == "experiment"],
                                         event="sync", reopen=True, force=True)

@@ -19,8 +19,9 @@ import re
 import subprocess
 import sys
 
-GATED = re.compile(r"(?:^|[\s;&|()`'\"/])nb\s+(freeze|confirm|invalidate|retract|verdict|nothing-yet|config\s+set)"
-                   r"(?![\w-])((?:\s+[^\s;&|()`]+)*)")
+# Arguments stop at the end of the line: a newline starts another command, which is scanned on its own.
+GATED = re.compile(r"(?:^|[\s;&|()`'\"/])nb[ \t]+(freeze|confirm|invalidate|retract|verdict|nothing-yet|config[ \t]+set)"
+                   r"(?![\w-])((?:[ \t]+[^\s;&|()`]+)*)")
 UNSETS = re.compile(r"(-u\s*CLAUDECODE\b|\bunset\b[^;&|\n]*\bCLAUDECODE\b|\bCLAUDECODE=|\benv\s+(?:-\S+\s+)*-i\b)")
 WHY = {
     "freeze": "approves this experiment design; after freezing its spec and predictions cannot change",
@@ -105,6 +106,7 @@ def main():
     cmd = (data.get("tool_input") or {}).get("command") or ""
     if "nb" not in cmd and "CLAUDECODE" not in cmd:
         return
+    cmd = cmd.replace("\\\n", " ")  # a backslash-newline continues the same command
     cwd = data.get("cwd")
     reasons, deny = [], []
     for m in GATED.finditer(cmd):

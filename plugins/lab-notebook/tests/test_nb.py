@@ -2414,6 +2414,22 @@ class TestClosingSync(NbCase):
             self.assertEqual(json.loads(self.ok_in(repo, "show", self.h2, "--json"))["status"], "refuted")
         self.assertEqual([i for i in json.loads(self.ok_in(B, "lint", "--json")) if i["level"] == "error"], [])
 
+    def test_invalidation_on_other_side_withdraws_verdicts(self):
+        B = self.shared_experiment()
+        self.ok("verdict", self.r, self.h1, "supported", "--basis", "a")
+        self.ok("verdict", self.r, self.h2, "refuted", "--basis", "b")
+        self.assertEqual(json.loads(self.ok("show", self.e, "--json"))["status"], "done")
+        self.ok("sync")
+        self.ok_in(B, "invalidate", self.r, "--reason", "bad run")
+        self.ok_in(B, "sync")
+        self.ok("sync")
+        for repo in (self.repo, B):
+            self.assertEqual(json.loads(self.ok_in(repo, "show", self.r, "--json"))["status"], "invalidated")
+            self.assertEqual(json.loads(self.ok_in(repo, "show", self.e, "--json"))["status"], "frozen")
+            for h in (self.h1, self.h2):
+                self.assertEqual(json.loads(self.ok_in(repo, "show", h, "--json"))["status"], "open")
+            self.assertEqual(json.loads(self.ok_in(repo, "lint", "--json")), [])
+
     def test_same_hypothesis_verdict_conflict(self):
         B = self.shared_experiment()
         self.ok("verdict", self.r, self.h1, "supported", "--basis", "a")
@@ -2496,6 +2512,13 @@ class TestGate(NbCase):
         self.assertIsNone(self.gate("nb verdict res-abcd hyp-abcd refuted --basis 'm 0.3 < 0.5'"))
         self.assertIn("nothing to conclude", self.gate("nb nothing-yet res-abcd res-efgh --note n"))
         self.assertIsNone(self.gate("nb nothing-yetx res-abcd"))
+
+    def test_gated_verb_on_a_later_line(self):
+        first = "nb verdict res-abcd hyp-abcd refuted --basis b"
+        self.assertIn("thresholds", self.gate(first + "\nnb config set freeze_gate false"))
+        self.assertIn("nb confirm con-abcd", self.gate("nb nothing-yet res-abcd\nnb confirm con-abcd"))
+        self.assertIsNone(self.gate(first + "\nrm --replace"))  # another line's flag is not this verb's
+        self.assertIn("overrides", self.gate(first + " \\\n  --replace --reason r"))  # a continued line is
 
     def test_freeze_denied_when_gate_blocked(self):
         h, q, e, r = self.notebook()
