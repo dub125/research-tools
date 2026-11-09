@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-2ecc64",
+  "title": "nb: input validation gaps reported in the spec review (unverified)",
+  "body": "Found in the spec-vs-code review of branch `worktree-agent-af4147e78b41b3bce` on 2026-11-09. Line numbers are that branch.\n\nReported by reviewers with reproductions; not re-checked.\n\n- `--artifact` paths are stored as typed, not relative to the repo root; only `--metrics` is relativised. Lint resolves artifacts against the root.\n- `--reason \"\"` is accepted by `nb invalidate` and `nb reject`, and the empty reason is not logged.\n- A multi-line title is accepted; SPEC says one line.\n- `nb config set` checks only the value's type (`pending_days -3`, empty `auditor_model`), and its usage errors exit 1, not 2.\n- `--user-words` is stored without `--origin`, and with `--origin claude`.\n- `--fresh` and a `variant-of` or `uses` link can coexist.\n- Unlinking `supersedes` from an open hypothesis leaves the old one superseded.",
+  "type": "bug",
+  "status": "open",
+  "priority": 3,
+  "labels": [
+    "lab-notebook"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-11-09T22:24:14.134638187Z",
+  "updated_at": "2026-11-09T22:24:14.134638187Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "9d60a12",
+      "branch": "worktree-agent-af4147e78b41b3bce"
+    },
+    "closed": null
+  }
+}
