@@ -13,7 +13,7 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-11-09T16:39:02.831187169Z",
-  "updated_at": "2026-11-09T17:02:55.402839335Z",
+  "updated_at": "2026-11-09T17:15:48.313514357Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
@@ -55,6 +55,14 @@
       "at": "2026-11-09T17:02:55.402837612Z",
       "author": "Dylan Wichman/7dfeebce",
       "text": "Decided with user 2026-11-09: backlog option (a): once the design is settled, an agent drafts one-claim conclusions and leads for the frozen-with-results items and the user triages them. Ids: (1) a skill rule to give the name first, then the id, and never ask a question about a bare id; (2) nb add, result and freeze print the id with its title. No aliases for now. Note: the phase 3 PostToolUse injection text in SPEC (record no conclusions or leads) contradicts this direction and must change.",
+      "commit": "441948a",
+      "branch": "nb-dev"
+    },
+    {
+      "id": "20856acb",
+      "at": "2026-11-09T17:15:48.313511963Z",
+      "author": "Dylan Wichman/7dfeebce",
+      "text": "User direction 2026-11-09: the frozen rule decides a hypothesis directly, with no conclusion node. The verdict (supported / refuted / inconclusive) goes with the result; the experiment closes once all its predictions have verdicts. Conclusions are then for interpretation only, and the user gives their read first. Checked in bioemu: each of the 33 hypotheses is tested by exactly one experiment, and the rules are three-way numeric bands. Open: whether applying a verdict needs approval. Risk: with experiments closing on verdicts, the gate no longer forces any interpretation, so cross-run findings could still go unrecorded; proposed a prime section listing questions whose hypotheses all have verdicts but no conclusion.",
       "commit": "441948a",
       "branch": "nb-dev"
     }
