@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-53a9da",
+  "title": "nb tests: behaviours with no test, from the spec review",
+  "body": "Found in the spec-vs-code review of branch `worktree-agent-af4147e78b41b3bce` on 2026-11-09. Line numbers are that branch.\n\nReviewers found no test for:\n\n- the freeze gate refusing Claude's own `nb freeze`;\n- tie-breaking of status events with equal `at`;\n- the reason logged on a hypothesis change caused by a verdict or invalidation;\n- brief: same-hypothesis results off the chain, the `retro` mark on item lines, the claims cap, forward `uses`;\n- audit bundle: metrics in a cited result, the experiment's verdicts key;\n- lint: stale interim-only and drift on an exploration;\n- prime: retro mark on a conclusion, the orderings, `--max-chars` hard cut;\n- the 5-character id fallback, `NB_REF`, the self-edge error, review-entry shape validation, `at` format validation;\n- sync: `--no-verify` push, the push-retry loop, the CAS 30-attempt limit, the pre-push block before a trailing `exit`.",
+  "type": "task",
+  "status": "open",
+  "priority": 4,
+  "labels": [
+    "lab-notebook"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-11-09T22:24:14.28387579Z",
+  "updated_at": "2026-11-09T22:24:14.28387579Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "9d60a12",
+      "branch": "worktree-agent-af4147e78b41b3bce"
+    },
+    "closed": null
+  }
+}
