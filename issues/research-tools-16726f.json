@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-16726f",
+  "title": "nb gate hook: $(which nb) and --also=<id> are not handled",
+  "body": "Found in the spec-vs-code review of branch `worktree-agent-af4147e78b41b3bce` on 2026-11-09. Line numbers are that branch.\n\n- `$(which nb) freeze x`, `nb --json freeze x` and `nb \"freeze\" x` produce no prompt. SPEC says nb invoked by name or path; it also frames the hook as a guard against a well-meaning agent.\n- `nb confirm con-x --also=hyp-y` prompts, but the follow-on line is missing (reviewer-reported, not checked).\n- \"proposed by Claude\" is appended for every verb, including retract (cosmetic).",
+  "type": "bug",
+  "status": "open",
+  "priority": 4,
+  "labels": [
+    "lab-notebook"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-11-09T22:24:14.098445555Z",
+  "updated_at": "2026-11-09T22:24:14.098445555Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "9d60a12",
+      "branch": "worktree-agent-af4147e78b41b3bce"
+    },
+    "closed": null
+  }
+}
