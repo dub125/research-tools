@@ -2317,7 +2317,8 @@ GATE = HERE.parent / "hooks" / "gate.py"
 class TestGate(NbCase):
     """hooks/gate.py: asks before gated nb verbs and CLAUDECODE overrides, silent otherwise."""
 
-    def gate(self, command, tool="Bash"):
+    def decide(self, command, tool="Bash"):
+        """(decision, reason) or None when the hook stays silent."""
         payload = json.dumps({"tool_name": tool, "cwd": str(self.repo), "tool_input": {"command": command}})
         res = subprocess.run([sys.executable, "-I", str(GATE)], input=payload, env=self.env,
                              capture_output=True, text=True)
@@ -2326,8 +2327,61 @@ class TestGate(NbCase):
             return None
         out = json.loads(res.stdout)["hookSpecificOutput"]
         self.assertEqual(out["hookEventName"], "PreToolUse")
-        self.assertEqual(out["permissionDecision"], "ask")
-        return out["permissionDecisionReason"]
+        return out["permissionDecision"], out["permissionDecisionReason"]
+
+    def gate(self, command, tool="Bash"):
+        d = self.decide(command, tool)
+        if d is None:
+            return None
+        self.assertEqual(d[0], "ask")
+        return d[1]
+
+    def notebook(self):
+        self.init()
+        g = self.add("goal", "G")
+        q = self.add("question", "Q", "--link", "refines:" + g)
+        h = self.add("hypothesis", "H", "--prediction", "p", "--link", "addresses:" + q)
+        e = self.add("experiment", "E", "--spec", "s", "--exec", "command")
+        self.ok("predict", e, h, "--prediction", "p", "--metric", "m", "--rule", "r")
+        self.ok("freeze", e)
+        r = self.ok("result", e, "res")
+        return h, q, e, r
+
+    def test_verdict_replace_and_nothing_yet_gated(self):
+        self.assertIn("overrides", self.gate("nb verdict res-abcd hyp-abcd refuted --basis b --replace --reason r"))
+        self.assertIsNone(self.gate("nb verdict res-abcd hyp-abcd refuted --basis 'm 0.3 < 0.5'"))
+        self.assertIn("nothing to conclude", self.gate("nb nothing-yet res-abcd res-efgh --note n"))
+        self.assertIsNone(self.gate("nb nothing-yetx res-abcd"))
+
+    def test_freeze_denied_when_gate_blocked(self):
+        h, q, e, r = self.notebook()
+        e2 = self.add("experiment", "Next", "--spec", "s", "--exec", "command")
+        self.ok("predict", e2, h, "--prediction", "p", "--metric", "m", "--rule", "r")
+        self.assertEqual(self.decide("nb freeze " + e2)[0], "ask")  # gate off
+        self.ok("config", "set", "freeze_gate", "true")
+        decision, reason = self.decide("nb freeze " + e2)
+        self.assertEqual(decision, "deny")
+        self.assertIn(r, reason)
+        self.assertIn(e, reason)
+        self.ok("verdict", r, h, "supported", "--basis", "b")
+        self.ok("nothing-yet", r)
+        self.assertEqual(self.decide("nb freeze " + e2)[0], "ask")
+
+    def test_confirm_reason_shows_origin_audit_and_follow_ons(self):
+        h, q, e, r = self.notebook()
+        c = self.add("conclusion", "Run 1 refutes H", "--rationale", "r", "--scope", "s", "--alternatives", "a",
+                     "--from", r, "--link", "contradicts:" + h, "--link", "answers:" + q,
+                     "--origin", "user", "--user-words", "it clearly fails", author="claude")
+        reason = self.gate("nb confirm %s --also %s" % (c, h))
+        self.assertIn("Your words: \"it clearly fails\"", reason)
+        self.assertIn("not audited", reason)
+        self.assertIn("also: hypothesis %s open -> refuted" % h, reason)
+        self.add("audit", "A", "--of", c, "--verdict", "concerns", "--findings", "scope broader than the data",
+                 author="claude")
+        reason = self.gate("nb confirm %s --also %s --also %s" % (c, h, q))
+        self.assertIn("concerns", reason)
+        self.assertIn("scope broader than the data", reason)
+        self.assertIn("also: question %s open -> answered" % q, reason)
 
     def test_gated_verbs_ask(self):
         for cmd in ["nb freeze exp-abcd", "nb confirm con-abcd", "nb invalidate res-abcd --reason r",
