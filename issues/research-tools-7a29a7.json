@@ -13,7 +13,7 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-11-09T16:39:02.831187169Z",
-  "updated_at": "2026-11-09T17:35:31.182270599Z",
+  "updated_at": "2026-11-09T18:00:33.319225156Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
@@ -95,6 +95,14 @@
       "at": "2026-11-09T17:35:31.182262815Z",
       "author": "Dylan Wichman/7dfeebce",
       "text": "Decided 2026-11-09: nb brief is deterministic and involves no agent judgment. It is tiered: the new result and its verdict first, then directly linked items (same hypothesis, variant-of chain, uses), then the same question, then \"possibly related, not linked\". One line per item: name, verdict, key number. Each tier has a cap that ends in \"(+N more: <command>)\"; nothing is dropped silently, and caps live in config. The agent shows the brief as is: it may not drop lines or add its own read unless asked.",
+      "commit": "441948a",
+      "branch": "nb-dev"
+    },
+    {
+      "id": "46b558b9",
+      "at": "2026-11-09T18:00:33.319221379Z",
+      "author": "Dylan Wichman/7dfeebce",
+      "text": "SPEC draft written 2026-11-09 (uncommitted, on nb-dev): plugins/lab-notebook/SPEC.md, new section \"Closing the loop\". Skill draft at plugins/lab-notebook/drafts/SKILL.md; the live SKILL.md is untouched because sessions may load it from the working tree. Awaiting user review before any code.",
       "commit": "441948a",
       "branch": "nb-dev"
     }
