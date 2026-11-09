@@ -1,0 +1,30 @@
+{
+  "id": "research-tools-456740",
+  "title": "nb: superseding a pending or rejected node moves it straight to superseded",
+  "body": "Found in the spec-vs-code review of branch `worktree-agent-af4147e78b41b3bce` on 2026-11-09. Line numbers are that branch.\n\nSPEC (Rules enforced on write): a pending goal, conclusion, lead or decision leaves `pending` only through `nb confirm` or `nb reject`.\n\n`establish` in `bin/nb` (line 719) sets any superseded-by target to `superseded` unless it already is. A reviewer reproduced it: a user `nb add goal --link supersedes:<pending> --link supersedes:<rejected>` turned both into `superseded`.\n\nDecide whether to refuse the link, or to allow it and say so in the spec.",
+  "type": "bug",
+  "status": "open",
+  "priority": 2,
+  "labels": [
+    "lab-notebook"
+  ],
+  "parent": null,
+  "blocked_by": [],
+  "related": [],
+  "assignee": null,
+  "lease_expires": null,
+  "defer_until": null,
+  "created_at": "2026-11-09T22:24:13.758321707Z",
+  "updated_at": "2026-11-09T22:24:13.758321707Z",
+  "closed_at": null,
+  "close_reason": null,
+  "resolution": null,
+  "notes": [],
+  "stamps": {
+    "created": {
+      "commit": "9d60a12",
+      "branch": "worktree-agent-af4147e78b41b3bce"
+    },
+    "closed": null
+  }
+}
