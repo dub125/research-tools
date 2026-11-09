@@ -13,11 +13,20 @@
   "lease_expires": null,
   "defer_until": null,
   "created_at": "2026-11-09T17:37:13.379270699Z",
-  "updated_at": "2026-11-09T17:37:13.379270699Z",
+  "updated_at": "2026-11-09T17:37:13.413907364Z",
   "closed_at": null,
   "close_reason": null,
   "resolution": null,
-  "notes": [],
+  "notes": [
+    {
+      "id": "ea86ccd3",
+      "at": "2026-11-09T17:37:13.413906332Z",
+      "author": "Dylan Wichman/7dfeebce",
+      "text": "User preference 2026-11-09, not a priority. Keep the type prefix so the kind of node stays visible. A word list of ~1000 adjectives x ~1000 nouns gives ~1M ids per type. Existing ids appear in other nodes' bodies, commit messages and chat, so new ids would apply to new nodes only (no rename), or old ids would need to stay accepted as aliases. A memorable id still says nothing about the content, so the \"name first, then id\" rule still applies.",
+      "commit": "441948a",
+      "branch": "nb-dev"
+    }
+  ],
   "stamps": {
     "created": {
       "commit": "441948a",
