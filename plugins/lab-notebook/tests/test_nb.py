@@ -2377,7 +2377,8 @@ class TestAuditBundle(SnapCase):
                      "--scope", "villin", "--alternatives", "noise of 0.05", "--from", r)
         got = json.loads(self.ok("audit", c, "--json"))["checks"]["numbers_not_in_cited_results"]
         self.assertEqual([(m["number"], m["field"]) for m in got],
-                         [("0.301", "title"), ("0.20", "rationale"), ("0.01", "rationale"), ("0.003", "rationale")])
+                         [("0.301", "title"), ("0.20", "rationale"), ("0.01", "rationale"), ("0.003", "rationale"),
+                          ("0.05", "alternatives")])
         found = {m["number"]: m["found"] for m in got}
         self.assertEqual(found["0.301"], "only in uncited results: " + r2)
         self.assertEqual(found["0.01"], "nowhere in the bundle")

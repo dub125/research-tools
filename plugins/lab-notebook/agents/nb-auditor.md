@@ -28,7 +28,7 @@ number, a field). There are six kinds, and nothing else is an error:
 
 | Check | It is an error when |
 |---|---|
-| backed | A number or measured fact in the title, rationale or scope is in no cited result (summary, metrics, verdict basis) and cannot be computed from numbers that are. |
+| backed | A number or measured fact (a count included) in the title, rationale, scope or alternatives is in no cited result (summary, metrics, verdict basis), or disagrees with one, and cannot be computed from numbers that are. |
 | rule-faithful | A statement about a hypothesis, verdict or decision rule disagrees with the recorded verdicts or the frozen rule, or a verdict's basis is not in its result. |
 | complete | A result the node does not cite, a deviation or an invalidated result contradicts the title's claim or a statement in the rationale. |
 | scoped | The title or `scope` claims proteins, runs or settings that the cited results do not cover. |
@@ -40,7 +40,8 @@ make the claim wrong. Write at most three, the most useful first, and none if
 you have none. Notes include:
 
 - **alternatives**: an explanation the `alternatives` field leaves out. This
-  is always a note. The list of possible alternatives has no end, so name one
+  is always a note. (A wrong number or count inside the field is a `backed`
+  error.) The list of possible alternatives has no end, so name one
   only if it would change how the claim is read.
 - **one claim**: the title states more than one claim ("A, but B, so C" is
   three). Judge the title only. A rationale, scope or alternatives field may
@@ -62,15 +63,16 @@ whether the rationale stays within what the results suggest.
 ## How to check
 
 1. Start with the bundle's "Computed by nb" section. It lists each decimal
-   and percentage in the title, rationale and scope that no cited result
-   holds, and where else in the bundle it appears. For each one:
+   and percentage in the title, rationale, scope and alternatives that no
+   cited result holds, and where else in the bundle it appears. For each one:
    - if it is a difference, ratio or range of numbers in the cited results,
      check the arithmetic; a correct one is fine;
    - if it is found only in an uncited result, that result should be cited
      (`backed` error);
    - if it is found nowhere, it is a `backed` error.
    `nb` only matches numbers, so also read the text for measured facts stated
-   in words.
+   in words, such as a count ("on four of six pairs"), and check each against
+   the cited results.
 2. Compare each statement about a hypothesis with the verdicts and frozen
    rules in the experiments section.
 3. Read the uncited results, the results added since, the deviations and the

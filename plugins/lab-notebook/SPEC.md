@@ -542,8 +542,8 @@ res-d148  Run 17: run 16 with 10k steps ...     hyp-qc5b refuted     unreviewed
 - the node, including `origin` and `user_words`;
 - its latest audit, if it has one (verdict, findings), and each field changed
   since that audit with its value before and after;
-- computed checks: each decimal and percentage in the title, rationale and
-  scope that no cited result holds (summary, metrics, verdict bases), and
+- computed checks: each decimal and percentage in the title, rationale,
+  scope and alternatives that no cited result holds (summary, metrics, verdict bases), and
   where else in the bundle it appears (an experiment's title, spec,
   predictions or deviations; an uncited result; nowhere). A number matches if
   it agrees after rounding to the precision the claim gives; a percentage also
@@ -568,7 +568,7 @@ An error is one of these, with something in the bundle to point to:
 
 | Check | It is an error when |
 |---|---|
-| backed | A number or measured fact in the title, rationale or scope is in no cited result and cannot be computed from numbers that are. The auditor starts from the bundle's computed checks. |
+| backed | A number or measured fact (a count included) in the title, rationale, scope or alternatives is in no cited result, or disagrees with one, and cannot be computed from numbers that are. The auditor starts from the bundle's computed checks. |
 | rule-faithful | A statement about a hypothesis, verdict or rule disagrees with the recorded verdicts or the frozen rule, or a verdict's basis is not in its result. |
 | complete | An uncited result (in the bundle, or found with `nb query --text`), a deviation or an invalidated result contradicts the title's claim or a statement in the rationale. |
 | scoped | The title or `scope` claims proteins, runs or settings the cited results do not cover. |

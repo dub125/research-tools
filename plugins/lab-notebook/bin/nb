@@ -2061,7 +2061,7 @@ def audit_checks(g, nid, cited, exps, uncited):
     in_design = [x for e in exps for x in evidence_numbers(
         g.nodes[e].get("title"), g.nodes[e].get("spec"), g.nodes[e].get("body"), g.nodes[e].get("predictions"), g.nodes[e].get("deviations"))]
     missing = []
-    for field in ("title", "rationale", "scope"):
+    for field in ("title", "rationale", "scope", "alternatives"):
         for tok, value, decimals, pct in claim_numbers(n.get(field)):
             if number_found(value, decimals, pct, in_cited) or any(m["number"] == tok for m in missing):
                 continue
@@ -2140,7 +2140,7 @@ AUDIT_SECTIONS = [
     ("node", "The node under audit"),
     ("previous_audit", "Its latest audit, and the fields changed since (before and after). changed_since {} means "
                        "nothing changed; null means the audited version cannot be found"),
-    ("checks", "Computed by nb: decimals and percentages in the title, rationale and scope that no cited result "
+    ("checks", "Computed by nb: decimals and percentages in the title, rationale, scope and alternatives that no cited result "
                "holds (summary, metrics, verdict bases), and where else in the bundle each appears"),
     ("cited_results", "Results it rests on"),
     ("experiments", "Their experiments and explorations: frozen spec, predictions, decision rules, verdicts, deviations"),
