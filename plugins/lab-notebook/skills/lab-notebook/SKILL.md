@@ -75,7 +75,11 @@ predictions, and the same builds-on links or `--fresh`).
        --run-dir <dir> --ext-id <id> --artifact <path> [--metrics file.json]
    ```
 
-   Verdicts apply at once. A partial result is `--interim` and gets no
+   Verdicts apply at once. A hypothesis's status comes from all current
+   verdicts on it, in no order: if experiments disagree it is `contested`
+   (`nb show <hyp>` lists each side). Tell the user and let them resolve it
+   (invalidate a flawed result, or supersede the hypothesis with a narrower
+   one); never pick a side yourself. A partial result is `--interim` and gets no
    verdicts. A procedure change during the run is `nb deviate`; analysis
    decided on after freezing is a new exploration that `uses` the result.
 
@@ -119,9 +123,10 @@ what it returns with `nb add audit --of <id> --verdict ... --findings ...
 words. If the audit finds problems, fix the draft with the user (a changed
 draft is re-audited) or let them reject it.
 
-**Confirming.** `nb show <id>` lists the follow-on status changes a
-conclusion allows (hypothesis supported/refuted, question answered). Ask the
-user which they want, then run `nb confirm <id> --also <id>...`.
+**Confirming.** `nb show <id>` lists the open questions a conclusion
+answers. Ask the user which to mark answered, then run `nb confirm <id>
+--also <q>...`. A conclusion never changes a hypothesis: hypotheses follow
+their verdicts only.
 
 **Decisions** (a choice, not a finding): `nb add decision "<choice>"
 --rationale "..." --reject "<alternative>" --revisit-if "..." --link

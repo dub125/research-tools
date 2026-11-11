@@ -147,6 +147,14 @@ class NbCase(unittest.TestCase):
         return e, r
 
     # ---- hand-made commits
+    def legacy_confirm_also(self, h, status, con):
+        """Put h in the state an older nb left after `nb confirm <con> --also <h>`."""
+        def fn(nodes, meta):
+            nodes[h]["log"].append({"date": TODAY, "author": "user", "event": "confirm-also", "from": nodes[h]["status"],
+                                    "to": status, "reason": "by " + con, "at": TODAY + "T00:00:01Z"})
+            nodes[h]["status"] = status
+        self.edit_ref(fn)
+
     def edit_ref(self, fn, repo=None):
         """Load the notebook tree, call fn(nodes, meta) to mutate dicts, write a new commit on the ref."""
         repo = repo or self.repo
@@ -1063,7 +1071,8 @@ class TestLint(SnapCase):
     def test_lost_hypothesis_verdict(self):
         d = self.d
         c1 = self.concl(d["r"], "--link", "supports:" + d["h"], author="claude")
-        self.confirm(c1, "--also", d["h"])
+        self.confirm(c1)
+        self.legacy_confirm_also(d["h"], "supported", c1)  # written by an older nb
         self.assertEqual(self.show(d["h"])["status"], "supported")
         self.assertNoLint(d["h"], "neither a current verdict")
         self.concl(d["r"], "--link", "supersedes:" + c1, title="Newer")
@@ -1651,7 +1660,22 @@ class TestSchema(SnapCase):
     def test_older_schema_written_back_current(self):
         self.edit_ref(lambda n, m: m.update(schema=0))
         self.add("goal", "G")
-        self.assertEqual(json.loads(self.git("show", REF + ":meta.json"))["schema"], 1)
+        self.assertEqual(json.loads(self.git("show", REF + ":meta.json"))["schema"], 2)
+
+    def test_schema_1_hypothesis_status_migrates_to_the_set_rule(self):
+        d = self.d
+        self.ok("verdict", d["r"], d["h"], "supported", "--basis", "b")
+        e2, _ = self.new_exp(d["h"], result=False)
+        self.ok("result", e2, "r2", "--verdict", d["h"], "refuted", "b2")
+        # What a schema-1 nb stored: the most recent verdict won.
+        self.edit_ref(lambda n, m: (n[d["h"]].update(status="refuted"), m.update(schema=1)))
+        self.assertEqual(self.show(d["h"])["status"], "contested")  # migrated in memory on read
+        self.assertEqual(json.loads(self.git("show", "%s:nodes/%s.json" % (REF, d["h"])))["status"], "refuted")
+        self.add("goal", "G")  # the next write stores it
+        stored = json.loads(self.git("show", "%s:nodes/%s.json" % (REF, d["h"])))
+        self.assertEqual((stored["status"], stored["log"][-1]["event"], stored["log"][-1]["from"]),
+                         ("contested", "migrate", "refuted"))
+        self.assertEqual(json.loads(self.git("show", REF + ":meta.json"))["schema"], 2)
 
 
 # ===================================================== 18 fixture ===
@@ -1807,27 +1831,36 @@ class TestVerdicts(SnapCase):
         rx = self.ok("result", x, "seen")
         self.assertIn("exploration", self.fails("verdict", rx, d["h"], "supported", "--basis", "b"))
 
-    def test_most_recent_event_wins_and_inconclusive_reopens(self):
+    def test_status_follows_the_set_of_verdicts(self):
         d = self.d
         self.ok("verdict", d["r"], d["h"], "supported", "--basis", "b")
-        e2, _ = self.new_exp(d["h"], result=False)
-        self.ok("result", e2, "r2", "--verdict", d["h"], "refuted", "b2", today="2026-10-29")
-        self.assertEqual(self.show(d["h"])["status"], "refuted")
-        self.assertLint("warn", d["h"], "conflicting current verdicts", today="2026-10-29")
         e3, _ = self.new_exp(d["h"], result=False, title="E3")
-        self.ok("result", e3, "r3", "--verdict", d["h"], "inconclusive", "b3", today="2026-10-30")
+        self.ok("result", e3, "r3", "--verdict", d["h"], "inconclusive", "b3", today="2026-10-29")
+        self.assertEqual(self.show(d["h"])["status"], "supported")  # an inconclusive verdict erases nothing
+        self.assertNoLint(d["h"], "contested")
+        e2, _ = self.new_exp(d["h"], result=False)
+        self.ok("result", e2, "r2", "--verdict", d["h"], "refuted", "b2", today="2026-10-30")
         h = self.show(d["h"])
-        self.assertEqual(h["status"], "open")
-        self.assertEqual((h["log"][-1]["event"], h["log"][-1]["from"], h["log"][-1]["to"]), ("verdict", "refuted", "open"))
+        self.assertEqual(h["status"], "contested")
+        self.assertEqual((h["log"][-1]["event"], h["log"][-1]["from"], h["log"][-1]["to"]), ("verdict", "supported", "contested"))
+        self.assertEqual(h["verdict_tally"], {"supported": [d["e"]], "refuted": [e2], "inconclusive": [e3]})
+        self.assertIn("verdicts: supported by %s; refuted by %s; inconclusive by %s" % (d["e"], e2, e3), self.ok("show", d["h"]))
+        self.assertLint("warn", d["h"], "contested: supported by %s; refuted by %s" % (d["e"], e2), today="2026-10-30")
+        self.ok("status", d["h"], "superseded", "--reason", "narrowed", today="2026-10-30")  # a contested hypothesis can be retired
+
+    def test_only_inconclusive_verdicts_leave_it_open(self):
+        d = self.d
+        self.ok("verdict", d["r"], d["h"], "inconclusive", "--basis", "b")
+        self.assertEqual(self.show(d["h"])["status"], "open")
 
     def test_invalidation_withdraws_and_recomputes(self):
         d = self.d
         self.ok("verdict", d["r"], d["h"], "supported", "--basis", "b")
         e2, _ = self.new_exp(d["h"], result=False)
         r2 = self.ok("result", e2, "r2", "--verdict", d["h"], "refuted", "b2", today="2026-10-29")
-        self.assertEqual((self.show(d["h"])["status"], self.show(e2)["status"]), ("refuted", "done"))
+        self.assertEqual((self.show(d["h"])["status"], self.show(e2)["status"]), ("contested", "done"))
         out = self.ok("invalidate", r2, "--reason", "wrong checkpoint", today="2026-10-30")
-        self.assertIn("%s refuted -> supported" % d["h"], out)
+        self.assertIn("%s contested -> supported" % d["h"], out)
         self.assertIn("%s done -> frozen" % e2, out)
         self.assertEqual((self.show(d["h"])["status"], self.show(e2)["status"]), ("supported", "frozen"))
         self.assertEqual(self.show(e2)["log"][-1]["event"], "invalidate")
@@ -1845,25 +1878,33 @@ class TestVerdicts(SnapCase):
         self.assertEqual(self.show(d["h"])["status"], "superseded")
         self.assertEqual(self.show(d["e"])["status"], "done")
 
-    def test_confirm_also_is_a_status_event(self):
+    def test_confirm_also_answers_questions_only(self):
         d = self.d
         c = self.concl(d["r"], "--link", "supports:" + d["h"], "--link", "answers:" + d["q"], author="claude")
         fo = {f["id"]: f["to"] for f in self.show(c)["follow_ons"]}
-        self.assertEqual(fo, {d["h"]: "supported", d["q"]: "answered"})
+        self.assertEqual(fo, {d["q"]: "answered"})
         self.assertIn("follow-ons", self.ok("show", c))
         self.audit(c)
         self.assertIn("not a follow-on", self.fails("confirm", c, "--also", d["g"]))
+        self.assertIn("follows its verdicts", self.fails("confirm", c, "--also", d["h"]))
         self.assertEqual(self.show(c)["status"], "pending")
-        out = self.ok("confirm", c, "--also", d["h"], "--also", d["q"])
-        self.assertIn("%s open -> supported" % d["h"], out)
-        self.assertEqual((self.show(d["h"])["status"], self.show(d["q"])["status"]), ("supported", "answered"))
-        ev = self.show(d["h"])["log"][-1]
-        self.assertEqual((ev["event"], ev["to"], ev["reason"]), ("confirm-also", "supported", "by " + c))
+        out = self.ok("confirm", c, "--also", d["q"])
+        self.assertIn("%s open -> answered" % d["q"], out)
+        self.assertEqual((self.show(d["h"])["status"], self.show(d["q"])["status"]), ("open", "answered"))
+        ev = self.show(d["q"])["log"][-1]
+        self.assertEqual((ev["event"], ev["to"], ev["reason"]), ("confirm-also", "answered", "by " + c))
+        self.assertRegex(ev["at"], r"^%sT\d\d:\d\d:\d\dZ$" % TODAY)
+
+    def test_legacy_confirm_also_on_a_hypothesis_still_counts(self):
+        d = self.d
+        c = self.concl(d["r"], "--link", "supports:" + d["h"], author="claude")
+        self.confirm(c)
+        self.legacy_confirm_also(d["h"], "supported", c)
         e2, _ = self.new_exp(d["h"], result=False)
         r2 = self.ok("result", e2, "r2", "--verdict", d["h"], "refuted", "b", today="2026-10-29")
-        self.assertEqual(self.show(d["h"])["status"], "refuted")
+        self.assertEqual(self.show(d["h"])["status"], "contested")  # the legacy entry is one vote
         self.ok("invalidate", r2, "--reason", "bug", today="2026-10-29")
-        self.assertEqual(self.show(d["h"])["status"], "supported")  # the confirm --also event remains
+        self.assertEqual(self.show(d["h"])["status"], "supported")  # the legacy vote remains
 
     def test_retro_verdict_marked(self):
         d = self.d
@@ -1873,57 +1914,35 @@ class TestVerdicts(SnapCase):
         self.assertIn("[retro]", self.ok("brief", r).splitlines()[2])
 
 
-class TestEventTime(SnapCase):
+class TestOrderIndependence(SnapCase):
     def two_experiments(self):
         d = self.d
         a, _ = self.new_exp(d["h"], result=False, title="EA")
         b, _ = self.new_exp(d["h"], result=False, title="EB")
         return sorted([a, b])
 
-    def test_same_date_events_order_by_at_not_experiment_id(self):
-        d = self.d
-        low, high = self.two_experiments()
-        # The later write comes from the experiment with the lower id: the old (date, experiment id)
-        # approximation would have let the earlier verdict win.
-        self.ok("result", high, "first", "--verdict", d["h"], "supported", "b1")
-        time.sleep(1.1)
-        self.ok("result", low, "second", "--verdict", d["h"], "refuted", "b2")
-        self.assertEqual(self.show(d["h"])["status"], "refuted")
-        ats = [self.show(e)["verdicts"][0]["at"] for e in (high, low)]
-        self.assertLess(ats[0], ats[1])
-
-    def test_ordering_follows_at_after_recompute(self):
+    def test_status_does_not_depend_on_write_order_or_times(self):
         d = self.d
         low, high = self.two_experiments()
         rl = self.ok("result", low, "l", "--verdict", d["h"], "refuted", "b")
         rh = self.ok("result", high, "h", "--verdict", d["h"], "supported", "b")
-        # Hand-set times on the same date: the low experiment's verdict is the later one. The next
-        # write (an older-dated verdict from a third experiment) recomputes the status.
+        self.assertEqual(self.show(d["h"])["status"], "contested")
+        # Swapping the recorded times, or dropping one (a pre-`at` entry), changes nothing.
         def times(n, m):
             n[low]["verdicts"][0]["at"] = TODAY + "T12:00:02Z"
-            n[high]["verdicts"][0]["at"] = TODAY + "T12:00:01Z"
+            n[high]["verdicts"][0].pop("at")
         self.edit_ref(times)
-        self.ok("verdict", d["r"], d["h"], "inconclusive", "--basis", "b", today="2026-10-27")  # older date
-        self.assertEqual(self.show(d["h"])["status"], "refuted")
+        self.ok("verdict", d["r"], d["h"], "inconclusive", "--basis", "b", today="2026-10-27")  # forces a recompute
+        self.assertEqual(self.show(d["h"])["status"], "contested")
+        self.assertEqual(self.lint_msgs()[0], 0)
         self.ok("invalidate", rl, "--reason", "bug")
         self.assertEqual(self.show(d["h"])["status"], "supported")
         self.assertTrue(rh)
 
-    def test_entries_without_at_sort_by_date_at_midnight(self):
+    def test_verdicts_still_record_when_they_were_written(self):
         d = self.d
-        low, high = self.two_experiments()
-        self.ok("result", low, "l", "--verdict", d["h"], "refuted", "b", today="2026-10-29")
-        self.edit_ref(lambda n, m: n[low]["verdicts"][0].pop("at"))  # a pre-`at` entry: 2026-10-29T00:00:00Z
-        self.ok("result", high, "h", "--verdict", d["h"], "supported", "b", today="2026-10-28")
-        self.assertEqual(self.show(d["h"])["status"], "refuted")
-        self.assertEqual(self.lint_msgs()[0], 0)
-
-    def test_confirm_also_has_at(self):
-        d = self.d
-        c = self.concl(d["r"], "--link", "supports:" + d["h"], author="claude")
-        self.confirm(c, "--also", d["h"])
-        ev = self.show(d["h"])["log"][-1]
-        self.assertRegex(ev["at"], r"^%sT\d\d:\d\d:\d\dZ$" % TODAY)
+        self.ok("verdict", d["r"], d["h"], "supported", "--basis", "b")
+        self.assertRegex(self.show(d["e"])["verdicts"][0]["at"], r"^%sT\d\d:\d\d:\d\dZ$" % TODAY)
 
 
 class TestBuildsOn(SnapCase):
@@ -2457,7 +2476,7 @@ class TestClosingSync(NbCase):
         self.ok_in(B, "sync", today="2026-10-29")
         self.ok("sync")
         for repo in (self.repo, B):
-            self.assertEqual(json.loads(self.ok_in(repo, "show", h, "--json"))["status"], "refuted")
+            self.assertEqual(json.loads(self.ok_in(repo, "show", h, "--json"))["status"], "contested")
 
     def test_fixed_fields_cannot_differ(self):
         B = self.shared_experiment()
@@ -2542,10 +2561,10 @@ class TestGate(NbCase):
         reason = self.gate("nb confirm %s --also %s" % (c, h))
         self.assertIn("Your words: \"it clearly fails\"", reason)
         self.assertIn("not audited", reason)
-        self.assertIn("also: hypothesis %s open -> refuted" % h, reason)
+        self.assertIn("also: %s (not a follow-on this node allows" % h, reason)
         self.add("audit", "A", "--of", c, "--verdict", "concerns", "--findings", "scope broader than the data",
                  author="claude")
-        reason = self.gate("nb confirm %s --also %s --also %s" % (c, h, q))
+        reason = self.gate("nb confirm %s --also %s" % (c, q))
         self.assertIn("concerns", reason)
         self.assertIn("scope broader than the data", reason)
         self.assertIn("also: question %s open -> answered" % q, reason)

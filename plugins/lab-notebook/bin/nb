@@ -24,7 +24,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- schema ---
 
-SCHEMA = 1
+SCHEMA = 2
 DEFAULT_REF = "refs/notebook/data"
 ORIGIN_REF = "refs/notebook/origin"
 RETRIES = 30
@@ -44,7 +44,7 @@ DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 STATUSES = {
     "goal": ["pending", "active", "superseded", "rejected"],
     "question": ["open", "answered", "settled", "parked", "abandoned"],
-    "hypothesis": ["open", "supported", "refuted", "superseded"],
+    "hypothesis": ["open", "supported", "refuted", "contested", "superseded"],
     "experiment": ["draft", "frozen", "done", "abandoned"],
     "exploration": ["draft", "frozen", "done", "abandoned"],
     "result": ["valid", "invalidated"],
@@ -62,9 +62,10 @@ INITIAL = {"draft", "open", "pending"}
 STATUS_MOVES = {
     "question": {"open": {"answered", "settled", "parked", "abandoned"},
                  "parked": {"open", "abandoned"}, "answered": {"open"}, "settled": {"open"}},
-    # A hypothesis's status is derived from verdicts and confirm --also (see Graph.hyp_events); by
-    # hand it can only be retired.
-    "hypothesis": {"open": {"superseded"}, "supported": {"superseded"}, "refuted": {"superseded"}},
+    # A hypothesis's status is derived from its verdicts (see Graph.hyp_events); by hand it can
+    # only be retired.
+    "hypothesis": {"open": {"superseded"}, "supported": {"superseded"}, "refuted": {"superseded"},
+                   "contested": {"superseded"}},
     # An experiment becomes done when every predicted hypothesis has a current verdict.
     "experiment": {"draft": {"abandoned"}, "frozen": {"abandoned"}},
     "exploration": {"draft": {"abandoned"}, "frozen": {"done", "abandoned"}},
@@ -184,11 +185,6 @@ def now_at():
     day from the clock, so events written in one test still order by when they were written."""
     now = datetime.datetime.now(datetime.timezone.utc)
     return "%sT%s" % (os.environ.get("NB_TODAY") or now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%SZ"))
-
-
-def event_at(entry):
-    """Sort key for a status event: its `at`, or its date at 00:00:00 for entries without one."""
-    return entry.get("at") or "%sT00:00:00Z" % entry.get("date", "")
 
 
 def age_days(date):
@@ -340,12 +336,16 @@ class Graph:
                 blobs[obj.get("id", path[6:-5])] = (data.decode(), sha)
         if meta.get("schema", 0) > SCHEMA:
             raise NbError("notebook schema %s is newer than this nb (%d); update the plugin" % (meta["schema"], SCHEMA))
-        meta["schema"] = SCHEMA  # migrations from older schemas go here
+        old = meta.get("schema", 0)
+        meta["schema"] = SCHEMA
         meta.setdefault("config", {})
         for n in nodes.values():
             for k, kind in fields_of(n.get("type")).items():
                 n.setdefault(k, default(kind))
-        return cls(git, commit, meta, nodes, blobs)
+        g = cls(git, commit, meta, nodes, blobs)
+        if old < 2:  # migrations from older schemas, in memory; the next write stores them
+            g.migrate_hyp_status()
+        return g
 
     # -- lookup
 
@@ -528,12 +528,13 @@ class Graph:
                 if isinstance(v, dict) and v.get("result") == rid]
 
     def hyp_events(self, h):
-        """Status events for hypothesis h as (sort key, status, source), oldest first.
+        """The votes on hypothesis h as (sort key, status, source): one per experiment with a
+        current verdict on it. The order (experiment id) is only for display; the status does not
+        depend on it or on when a verdict was written.
 
-        A current verdict from any experiment, and every `confirm --also` recorded in h's log,
-        ordered by `at` (UTC write time; entries without one count as their date at 00:00:00).
-        Ties are broken by position in the verdict list or log; between different lists (same
-        second), a verdict counts before a confirm --also, then by experiment id.
+        Legacy: `nb confirm --also` used to let a conclusion set a hypothesis's status, stored as
+        a `confirm-also` entry in h's log. nb no longer writes these, but each entry already in a
+        notebook still counts as one vote.
         """
         events = []
         for e in sorted(self.into(h, "tests")):
@@ -541,21 +542,44 @@ class Graph:
                 continue
             v = self.current_verdicts(e).get(h)
             if v:
-                i = self.nodes[e]["verdicts"].index(v)
-                events.append(((event_at(v), 0, e, i), VERDICT_STATUS.get(v.get("verdict"), "open"),
-                               "%s %s on %s (%s)" % (v.get("verdict"), h, v.get("result"), e)))
+                events.append(((0, e, 0), VERDICT_STATUS.get(v.get("verdict"), "open"), e))
         for i, entry in enumerate(self.nodes[h]["log"]):
-            if isinstance(entry, dict) and entry.get("event") == "confirm-also" and entry.get("to"):
-                events.append(((event_at(entry), 1, "", i), entry["to"], entry.get("reason", "confirm --also")))
-        events.sort(key=lambda x: x[0])
+            if isinstance(entry, dict) and entry.get("event") == "confirm-also" and entry.get("to") in ("supported", "refuted"):
+                events.append(((1, "", i), entry["to"], "%s (legacy confirm --also)" % entry.get("reason", "a conclusion")))
         return events
 
+    def hyp_tally(self, h):
+        """{'supported': [sources], 'refuted': [...], 'inconclusive': [...]} over h's votes."""
+        tally = {"supported": [], "refuted": [], "inconclusive": []}
+        for _, st, src in self.hyp_events(h):
+            tally["inconclusive" if st == "open" else st].append(src)
+        return tally
+
+    def hyp_verdict(self, h):
+        """(status, reason) from the set of votes, whatever their order; (None, ...) with no votes.
+
+        Any supported and no refuted -> supported; any refuted and no supported -> refuted; both
+        -> contested; only inconclusive -> open.
+        """
+        t = self.hyp_tally(h)
+        if not any(t.values()):
+            return None, "no current verdict"
+        st = ("contested" if t["supported"] and t["refuted"] else "supported" if t["supported"]
+              else "refuted" if t["refuted"] else "open")
+        return st, "; ".join("%s: %s" % (k, ", ".join(v)) for k, v in t.items() if v)
+
     def derive_hyp(self, h):
-        """The derived status, or None for a hypothesis with no status events (left as it is)."""
+        """The derived status, or None for a hypothesis with no votes (left as it is)."""
         if self.status(h) == "superseded":
             return "superseded"
-        ev = self.hyp_events(h)
-        return ev[-1][1] if ev else None
+        return self.hyp_verdict(h)[0]
+
+    def migrate_hyp_status(self):
+        """Schema 1 -> 2: hypothesis status comes from the set of verdicts, not the most recent."""
+        for h in sorted(k for k, n in self.nodes.items() if n.get("type") == "hypothesis"):
+            new, why = self.hyp_verdict(h)
+            if new and self.status(h) != "superseded" and new != self.status(h):
+                self.set_status(h, new, "migrate", reason="schema 2: " + why)
 
     def recompute(self, hyps=(), exps=(), event="verdict", reopen=False, force=False):
         """Bring derived statuses up to date; returns change lines ('hyp-x open -> refuted').
@@ -568,11 +592,11 @@ class Graph:
         for h in sorted(set(hyps)):
             if h not in self.nodes or self.status(h) == "superseded":
                 continue
-            ev = self.hyp_events(h)
-            new = ev[-1][1] if ev else ("open" if force else None)
+            new, why = self.hyp_verdict(h)
+            new = new or ("open" if force else None)
             if new and new != self.status(h):
                 changes.append("%s %s -> %s" % (h, self.status(h), new))
-                self.set_status(h, new, event, reason=ev[-1][2] if ev else "no current verdict")
+                self.set_status(h, new, event, reason=why)
         for e in sorted(set(exps)):
             if self.type(e) != "experiment":
                 continue
@@ -646,14 +670,13 @@ class Graph:
         return out
 
     def follow_ons(self, cid):
-        """[(id, new status)] that `nb confirm <cid> --also` may apply."""
+        """[(id, new status)] that `nb confirm <cid> --also` may apply: the open questions it answers.
+
+        A hypothesis is never a follow-on: its status follows its verdicts only.
+        """
         if self.type(cid) != "conclusion":
             return []
-        out = [(h, "supported") for h in self.out(cid, "supports") if self.type(h) == "hypothesis"]
-        out += [(h, "refuted") for h in self.out(cid, "contradicts") if self.type(h) == "hypothesis"]
-        out = [(h, s) for h, s in out if self.status(h) != "superseded"]
-        out += [(q, "answered") for q in self.out(cid, "answers") if self.status(q) == "open"]
-        return out
+        return [(q, "answered") for q in self.out(cid, "answers") if self.status(q) == "open"]
 
     # -- audits
 
@@ -1234,7 +1257,7 @@ def cmd_status(args):
             elif t == "result":
                 hint = "nb invalidate"
             elif t == "hypothesis":
-                hint = "nb result --verdict, nb verdict or nb confirm --also; a hypothesis follows its verdicts"
+                hint = "nb result --verdict or nb verdict; a hypothesis follows its verdicts"
             elif t == "experiment" and new == "done":
                 hint = "nb result --verdict or nb verdict; an experiment is done once every predicted hypothesis has one"
             raise NbError("%s cannot go from %s to %s with nb status%s"
@@ -1472,6 +1495,9 @@ def cmd_confirm(args):
         also = []
         for term in args.also or []:
             x = g.resolve(term)
+            if x not in offers and g.type(x) == "hypothesis":
+                raise NbError("%s is a hypothesis; its status follows its verdicts (nb result --verdict, "
+                              "nb verdict), not a conclusion" % x)
             if x not in offers:
                 raise NbError("%s is not a follow-on of %s (available: %s)"
                               % (x, nid, ", ".join("%s %s" % kv for kv in sorted(offers.items())) or "none"))
@@ -1480,9 +1506,7 @@ def cmd_confirm(args):
         changes = []
         for x in also:
             new = offers[x]
-            # The confirm-also log entry is the record of the change and, on a hypothesis, a
-            # status event that later recomputes count (see hyp_events). It is logged even when
-            # the status does not change.
+            # The confirm-also log entry is the record of the change (a question becoming answered).
             changes.append("%s %s -> %s" % (x, g.status(x), new) if g.status(x) != new else "%s stays %s" % (x, new))
             g.set_status(x, new, "confirm-also", reason="by %s" % nid, at=now_at())
         return nid, n["status"], changes
@@ -1582,6 +1606,8 @@ def cmd_show(args):
         extra["missing_verdicts"] = g.missing_verdicts(nid)
     if t in ("experiment", "exploration"):
         extra["builds_on"] = builds_on(g, nid)
+    if t == "hypothesis":
+        extra["verdict_tally"] = g.hyp_tally(nid)
     if t in ("conclusion", "lead"):
         a = g.latest_audit(nid)
         if a:
@@ -1638,6 +1664,8 @@ def cmd_show(args):
                                                     short(a["findings"], 200)))
     elif t in ("conclusion", "lead") and n.get("status") == "pending":
         lines.append("latest audit: none")
+    if any((extra.get("verdict_tally") or {}).values()):
+        lines.append("verdicts: " + "; ".join("%s by %s" % (k, ", ".join(v)) for k, v in extra["verdict_tally"].items() if v))
     if extra.get("follow_ons"):
         lines.append("follow-ons on confirm (nb confirm %s --also <id>):" % nid)
         lines.extend("  %s %s -> %s: %s" % (f["id"], f["status"], f["to"], short(f["title"], 60)) for f in extra["follow_ons"])
@@ -2133,13 +2161,11 @@ def lint(g, full=True):
                 add("warn", nid, "%s, but neither a current verdict nor a supported conclusion that %s it is behind it"
                     % (st, "supports" if st == "supported" else "contradicts"))
         if t == "hypothesis":
-            cur = {}
-            for e in g.into(nid, "tests"):
-                if g.type(e) == "experiment" and nid in g.current_verdicts(e):
-                    cur[e] = g.current_verdicts(e)[nid]["verdict"]
-            if len(set(cur.values())) > 1:
-                add("warn", nid, "conflicting current verdicts: %s"
-                    % ", ".join("%s %s" % (cur[e], e) for e in sorted(cur)))
+            tally = g.hyp_tally(nid)
+            if tally["supported"] and tally["refuted"]:
+                add("warn", nid, "contested: supported by %s; refuted by %s (invalidate a flawed result or "
+                    "supersede the hypothesis with a narrower one)"
+                    % (", ".join(tally["supported"]), ", ".join(tally["refuted"])))
         if t == "experiment" and st == "done" and g.missing_verdicts(nid):
             add("warn", nid, "done, but no current verdict for %s (backfill with nb verdict)"
                 % ", ".join(g.missing_verdicts(nid)))
@@ -2581,7 +2607,7 @@ def build_parser():
     sp = add("confirm", cmd_confirm, "establish a pending node (the user's approval)")
     sp.add_argument("id")
     sp.add_argument("--also", action="append", metavar="ID",
-                    help="apply a follow-on status change the conclusion allows (see nb show); repeat per value")
+                    help="also mark a question the conclusion answers as answered (see nb show); repeat per value")
 
     sp = add("reject", cmd_reject, "reject a pending node")
     sp.add_argument("id")

@@ -60,11 +60,18 @@ variable that sets the author (see [Authorship](#authorship)).
 
 ### Schema versioning
 
-`meta.json` carries `schema` (an integer, currently 1). `nb` migrates an older
+`meta.json` carries `schema` (an integer, currently 2). `nb` migrates an older
 schema in memory and writes the new one on the next write. It refuses a ref
 whose schema is newer than it knows. Adding an optional field with a default
 does not bump the schema; renaming, restructuring or adding a required field
 does, with a migration function in `bin/nb`.
+
+Schema 2 derives a hypothesis's status from the set of its verdicts instead
+of the most recent one, and adds the `contested` status (see
+[Hypothesis status](#hypothesis-status)). Migrating from schema 1 recomputes
+every hypothesis that has a verdict, with a `migrate` log entry for each one
+that changes. An `nb` from before schema 2 refuses the notebook, so update the
+plugin on every machine before syncing.
 
 The verdict, review and audit additions are optional fields and need no
 bump. In a notebook from before them: done experiments without verdicts are
@@ -168,7 +175,7 @@ Unknown fields are errors.
 |---|---|---|
 | `goal` | pending, active, superseded, rejected | none |
 | `question` | open, answered, settled, parked, abandoned | none |
-| `hypothesis` | open, supported, refuted, superseded | `prediction` (required): what should be observed if it holds |
+| `hypothesis` | open, supported, refuted, contested, superseded | `prediction` (required): what should be observed if it holds |
 | `experiment` | draft, frozen, done, abandoned | see below |
 | `exploration` | draft, frozen, done, abandoned | see below |
 | `result` | valid, invalidated | `summary` (required, facts only), `provenance`, `metrics`, `interim` (bool), `reviews` (see [Review](#review)) |
@@ -227,7 +234,7 @@ design is approved rather than reconstructed later.
 | `frozen_at` | string | Set by `freeze`: the notebook version at freezing. |
 | `deviations` | list of `{date, author, text}` | Append-only after freezing: anything done differently from the spec, and why. |
 | `runs` | list of `{date, command, commit, dirty, cwd}` | Run attempts, appended by the run hook (phase 3). Shown next to results so that "1 result from 4 runs" is visible. |
-| `verdicts` | list of `{hypothesis, verdict, result, basis, date, at, author, replaces?, reason?}` | Experiment only. Append-only history, written only by `nb result --verdict` and `nb verdict`. `verdict` is `supported`, `refuted` or `inconclusive`; `result` is the result it was judged on; `basis` is the measured value and the bound it was compared to (`jsd_tp 0.312 >= 0.295`). A replacement is a new entry with `replaces: true` and a `reason`. `at` is the UTC time of the write (`YYYY-MM-DDTHH:MM:SSZ`), used to order status events. The **current** verdict for a hypothesis is its last entry whose result is still valid. See [Verdicts](#verdicts). |
+| `verdicts` | list of `{hypothesis, verdict, result, basis, date, at, author, replaces?, reason?}` | Experiment only. Append-only history, written only by `nb result --verdict` and `nb verdict`. `verdict` is `supported`, `refuted` or `inconclusive`; `result` is the result it was judged on; `basis` is the measured value and the bound it was compared to (`jsd_tp 0.312 >= 0.295`). A replacement is a new entry with `replaces: true` and a `reason`. `at` is the UTC time of the write (`YYYY-MM-DDTHH:MM:SSZ`), kept as a record; no status depends on it. The **current** verdict for a hypothesis is its last entry whose result is still valid. See [Verdicts](#verdicts). |
 
 **Result** `provenance` is an object, captured automatically where possible:
 
@@ -398,23 +405,44 @@ recorded with the result (`nb result <exp> ... --verdict <hyp> <verdict>
 
 ### Hypothesis status
 
-A hypothesis's status is derived, not stored by hand:
+A hypothesis's status is derived, not stored by hand. It is a function of the
+**set** of current verdicts on it, one per experiment that tests it. The order
+in which verdicts were recorded, and the clocks of the machines that recorded
+them, play no part.
 
-- `superseded` once a newer hypothesis supersedes it. Verdicts and conclusions
-  no longer change it.
-- Otherwise, the most recent **status event** decides, ordered by its `at`
-  time (ties broken by position in the list or log):
-  - a current verdict counts as an event: `supported` → `supported`,
-    `refuted` → `refuted`, `inconclusive` → `open`;
-  - a `nb confirm --also` that applies a conclusion's `supports` or
-    `contradicts` to it counts as an event: `supported` or `refuted`. It is
-    stored as a `confirm-also` entry in the hypothesis's log, with `at`.
-- No events → `open`.
+- `superseded` once a newer hypothesis supersedes it. Verdicts no longer
+  change it.
+- Otherwise:
 
-`nb` recomputes this after every write that adds or withdraws an event
-(result, verdict, confirm, invalidate, sync) and logs each change with the
-event that caused it. Two current verdicts from different experiments that
-disagree are a lint warning.
+| Current verdicts | Status |
+|---|---|
+| none, or only `inconclusive` | `open` |
+| at least one `supported`, no `refuted` | `supported` |
+| at least one `refuted`, no `supported` | `refuted` |
+| both `supported` and `refuted` | `contested` |
+
+An inconclusive verdict never cancels a conclusive one, and one refuting
+verdict against any number of supporting ones is `contested`: there is no
+majority rule. `nb show <hyp>` lists which experiments are on each side.
+
+A contested hypothesis is a lint warning and stays contested until the
+evidence changes by an explicit act: `nb invalidate` a result that was flawed,
+or supersede the hypothesis with a narrower one that the experiments agree on
+("holds at 30k steps or more"). `nb` never picks a side.
+
+`nb` recomputes the status after every write that adds or withdraws a verdict
+(result, verdict, invalidate, sync) and logs each change with the tally that
+caused it.
+
+Verdicts are the only way a hypothesis is decided. A conclusion may link
+`supports` or `contradicts` to a hypothesis, but confirming it does not change
+the hypothesis; a hypothesis no experiment has tested is decided by designing
+one (`--retro` if the results already exist).
+
+Legacy: `nb confirm --also <hyp>` used to let a conclusion set a hypothesis's
+status, stored as a `confirm-also` entry in the hypothesis's log. `nb` no
+longer writes these and refuses the command. Each entry already in a notebook
+counts as one vote, `supported` or `refuted`, alongside the verdicts.
 
 ### Review
 
@@ -562,7 +590,7 @@ so when Claude runs them the user must approve:
 | Command | Why |
 |---|---|
 | `nb freeze` | Approving an experiment design. Claude cannot approve its own, so it cannot chain experiments. |
-| `nb confirm` | Making a pending goal, conclusion, lead or decision established, and any follow-on status changes named with `--also`. |
+| `nb confirm` | Making a pending goal, conclusion, lead or decision established, and marking the questions named with `--also` as answered. |
 | `nb invalidate` | Withdrawing a result. |
 | `nb retract` | Withdrawing a piece of evidence (a `supports` or `contradicts` link). |
 | `nb verdict --replace` | Overriding how a frozen rule was applied. |
@@ -595,7 +623,7 @@ rules:
 | A `done` experiment has a predicted hypothesis without a current verdict (expected in notebooks from before verdicts, until backfilled with `nb verdict`) | warn |
 | An experiment or exploration whose only results are interim and older than `pending_days` | warn |
 | A `supported` or `refuted` hypothesis has neither a verdict nor a `supported` conclusion behind it that agrees; an `answered` question no longer has a `supported` conclusion behind it (it was superseded or refuted); a `settled` question no longer has an `active` decision | warn |
-| A hypothesis has conflicting current verdicts from different experiments | warn |
+| A hypothesis is `contested`: current verdicts from different experiments both support and refute it | warn |
 | A valid, non-interim result has been unreviewed for more than `pending_days` (reported whether or not `freeze_gate` is on) | warn |
 | A pending conclusion or lead whose latest audit has verdict `concerns` or `unsound` | warn |
 | An `open` question has no path to an active goal (its goal was superseded and it was not re-linked, parked or abandoned) | warn |
@@ -704,7 +732,7 @@ their names and types.
 | `nb result <exp> <summary> [--interim] [--verdict HYP VERDICT BASIS]... [--run-dir D] [--artifact P]... [--ext-id X]... [--metrics FILE] [--commit SHA] [--tag T]... [--link supports\|contradicts:ID]...` | Record a result with provenance and apply its verdicts; print its id on stdout and the title, verdicts and any status changes on stderr. |
 | `nb verdict <res> <hyp> <verdict> --basis B [--replace --reason R]` | Add a verdict judged on an existing result (backfilling), or replace one (`--replace`, gated). |
 | `nb nothing-yet <res>... [--note N]` | Record that the user reviewed these results and has nothing to conclude yet. Gated. |
-| `nb confirm <id> [--also <id>]...` | Establish a pending node; apply its supersessions; with `--also`, apply the follow-on status changes it allows (hypothesis `supported`/`refuted`, question `answered`). `nb show` on a pending conclusion lists the follow-ons available. Gated; the prompt names each follow-on. |
+| `nb confirm <id> [--also <id>]...` | Establish a pending node; apply its supersessions; with `--also`, mark open questions the conclusion `answers` as `answered`. `nb show` on a pending conclusion lists the follow-ons available. A hypothesis is never a follow-on: it follows its verdicts. Gated; the prompt names each follow-on. |
 | `nb reject <id> --reason R` | Reject a pending node (`rejected`, or `dropped` for a lead). |
 | `nb invalidate <res> --reason R` | Invalidate a result. Gated. |
 | `nb retract <from> supports\|contradicts <to> --reason R` | Remove a mistaken evidence link from any node; logged. Gated. |
@@ -781,5 +809,6 @@ Phase 2:
 
 - Whether conclusion-strength rules should ever block rather than warn.
 - Whether `prime` should rank open questions by activity instead of recency.
-- Whether verdicts on a hypothesis tested by several experiments should
-  combine into something other than "most recent wins".
+- Whether a design may declare at freeze that it replaces an earlier
+  experiment as the test of a hypothesis, so that a better rerun does not
+  leave the hypothesis `contested`.
