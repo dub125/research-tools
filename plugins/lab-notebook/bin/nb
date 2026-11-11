@@ -698,9 +698,10 @@ class Graph:
         a = self.audits_of(nid)
         return a[-1] if a else None
 
-    def audit_changes(self, aid, nid):
-        """Fields of nid changed since audit aid was made (tags, refs, log and updated excepted).
-        None if the audited version cannot be found."""
+    def audit_diff(self, aid, nid):
+        """{field: {"before", "after"}} for the fields of nid changed since audit aid was made
+        (tags, refs, log, updated, status and confirmed_at excepted). None if the audited version cannot
+        be found."""
         sha = self.nodes[aid].get("audited_at")
         if not sha:
             return None
@@ -708,8 +709,14 @@ class Graph:
         if res.returncode != 0:
             return None
         then, now = json.loads(res.stdout), json.loads(serialise(self.nodes[nid]))
-        skip = {"tags", "refs", "log", "updated"}
-        return sorted(k for k in set(then) | set(now) if k not in skip and then.get(k) != now.get(k))
+        skip = {"tags", "refs", "log", "updated", "status", "confirmed_at"}
+        return {k: {"before": then.get(k), "after": now.get(k)}
+                for k in sorted(set(then) | set(now)) if k not in skip and then.get(k) != now.get(k)}
+
+    def audit_changes(self, aid, nid):
+        """Names of the fields in audit_diff, or None."""
+        d = self.audit_diff(aid, nid)
+        return None if d is None else sorted(d)
 
     def audit_current(self, aid, nid):
         return self.audit_changes(aid, nid) == []
@@ -1112,6 +1119,9 @@ def cmd_add(args):
             g.add_link(nid, "audits", g.resolve(args.of, {"conclusion", "lead"}))
             n["audited_at"] = g.head or ""
             n["auditor"] = n["auditor"] or who
+        if t == "audit" and n.get("verdict") == "sound" and any(
+                l.lstrip(" -*").lower().startswith("error:") for l in (n.get("findings") or "").splitlines()):
+            raise NbError("an audit with an `error:` finding cannot have the verdict sound; use concerns or unsound")
         if t == "conclusion":
             check_conclusion_basis(g, nid)
         g.touch(n, "add", to=n["status"] or None)
@@ -1987,6 +1997,85 @@ def bundle_node(g, k, drop=("log",)):
     return d
 
 
+CLAIM_NUM = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?%?(?!\.?\w)")
+
+
+def claim_numbers(text):
+    """Decimals and percentages in text as (token, value, decimals, is_percent), in order, once
+    each. Plain integers are left out: they are mostly run numbers, step counts and dates."""
+    out, seen = [], set()
+    for tok in CLAIM_NUM.findall(text or ""):
+        pct, num = tok.endswith("%"), tok.rstrip("%")
+        if ("." in num or pct) and tok not in seen:
+            seen.add(tok)
+            out.append((tok, float(num), len(num.partition(".")[2]), pct))
+    return out
+
+
+def evidence_numbers(*parts):
+    """Every number in parts (strings, numbers, lists, dicts) as (value, is_percent)."""
+    out = []
+
+    def walk(x):
+        if isinstance(x, bool) or x is None:
+            return
+        if isinstance(x, (int, float)):
+            out.append((float(x), False))
+        elif isinstance(x, str):
+            for tok in re.findall(r"-?\d+(?:\.\d+)?%?", x):
+                out.append((float(tok.rstrip("%")), tok.endswith("%")))
+        elif isinstance(x, dict):
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, (list, tuple)):
+            for v in x:
+                walk(v)
+
+    walk(parts)
+    return out
+
+
+def number_found(value, decimals, pct, evidence):
+    """Is a claim's number in the evidence, allowing for rounding to the claim's precision, a
+    dropped sign (a range written "0.39-0.87") and a fraction quoted as a percentage?"""
+    tol = 0.5 * 10 ** -decimals + 1e-9
+    for v, vp in evidence:
+        cands = [v, abs(v)]
+        if pct and not vp:
+            cands += [v * 100, abs(v) * 100]
+        if any(abs(c - value) <= tol or abs(c - abs(value)) <= tol for c in cands):
+            return True
+    return False
+
+
+def audit_checks(g, nid, cited, exps, uncited):
+    """What nb can check without judgement: the numbers in the claim that no cited result holds."""
+    n = g.nodes[nid]
+
+    def result_ev(r):
+        m = g.nodes[r]
+        return evidence_numbers(m.get("summary"), m.get("body"), m.get("metrics"),
+                                [v.get("basis") for v in g.verdicts_on(r)])
+
+    in_cited = [x for r in cited for x in result_ev(r)]
+    in_design = [x for e in exps for x in evidence_numbers(
+        g.nodes[e].get("title"), g.nodes[e].get("spec"), g.nodes[e].get("body"), g.nodes[e].get("predictions"), g.nodes[e].get("deviations"))]
+    missing = []
+    for field in ("title", "rationale", "scope"):
+        for tok, value, decimals, pct in claim_numbers(n.get(field)):
+            if number_found(value, decimals, pct, in_cited) or any(m["number"] == tok for m in missing):
+                continue
+            where = "nowhere in the bundle"
+            if number_found(value, decimals, pct, in_design):
+                where = "only in an experiment's title, spec, predictions or deviations"
+            else:
+                hits = [r for r in uncited if number_found(value, decimals, pct, result_ev(r))]
+                if hits:
+                    where = "only in uncited results: " + ", ".join(hits)
+            missing.append({"number": tok, "field": field, "found": where})
+    return {"numbers_not_in_cited_results": missing}
+
+
 def audit_bundle(g, nid):
     n = g.nodes[nid]
     cited = [r for r in g.out(nid, "derived-from", "suggested-by") if g.type(r) == "result"]
@@ -2029,7 +2118,16 @@ def audit_bundle(g, nid):
         a = g.latest_audit(c)
         return dict(bundle_node(g, c), latest_audit=bundle_node(g, a) if a else None)
 
+    prev, last = None, g.latest_audit(nid)
+    if last:
+        a = g.nodes[last]
+        prev = {"id": last, "verdict": a.get("verdict", ""), "findings": a.get("findings", ""),
+                "auditor": a.get("auditor", ""), "date": a["created"], "changed_since": g.audit_diff(last, nid)}
+    since_ids = [r for r in since if r not in uncited]
+
     return {"node": dict(bundle_node(g, nid), retro=g.retro(nid)),
+            "previous_audit": prev,
+            "checks": audit_checks(g, nid, cited, exps, uncited + since_ids),
             "cited_results": [result(r) for r in cited],
             "experiments": [experiment(e) for e in exps],
             "uncited_results": [result(r) for r in uncited],
@@ -2040,6 +2138,10 @@ def audit_bundle(g, nid):
 
 AUDIT_SECTIONS = [
     ("node", "The node under audit"),
+    ("previous_audit", "Its latest audit, and the fields changed since (before and after). changed_since {} means "
+                       "nothing changed; null means the audited version cannot be found"),
+    ("checks", "Computed by nb: decimals and percentages in the title, rationale and scope that no cited result "
+               "holds (summary, metrics, verdict bases), and where else in the bundle each appears"),
     ("cited_results", "Results it rests on"),
     ("experiments", "Their experiments and explorations: frozen spec, predictions, decision rules, verdicts, deviations"),
     ("uncited_results", "Other results of those experiments, not cited"),

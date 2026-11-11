@@ -2118,6 +2118,12 @@ class TestOriginAndAudit(SnapCase):
         self.ok("confirm", lead)
         self.assertEqual(self.show(d["r"])["reviews"][0]["by"], lead)
         self.fails("add", "audit", "A", "--of", d["h"], "--verdict", "sound", "--findings", "x")
+        # sound means no errors: notes are allowed, an error finding is not
+        self.audit(lead, "sound", "- note: alternatives: seed noise is not listed")
+        self.assertIn("cannot have the verdict sound",
+                      self.fails("add", "audit", "A", "--of", lead, "--verdict", "sound",
+                                 "--findings", "- note: one claim: two claims\n- error: backed: 0.5 is in no result"))
+        self.assertNoLint(lead, "audit")
 
     def test_switch_off_and_other_types(self):
         d = self.d
@@ -2339,6 +2345,44 @@ class TestAuditBundle(SnapCase):
         lead = self.add("lead", "L", "--rationale", "r", "--from", d["r"])
         self.assertEqual(json.loads(self.ok("audit", lead, "--json"))["node"]["id"], lead)
         self.fails("audit", d["h"])
+
+    def test_previous_audit_and_changes(self):
+        d = self.d
+        c = self.concl(d["r"], author="claude")
+        bundle = lambda: json.loads(self.ok("audit", c, "--json"))
+        self.assertIsNone(bundle()["previous_audit"])
+        a1 = self.audit(c, "concerns", "error: backed: 0.5 is in no cited result")
+        p = bundle()["previous_audit"]
+        self.assertEqual((p["id"], p["verdict"], p["changed_since"]), (a1, "concerns", {}))
+        self.assertIn("0.5 is in no cited result", p["findings"])
+        self.ok("set", c, "scope", "chignolin only")
+        self.ok("set", c, "tags", "t", "--append")  # not part of what an audit covers
+        p = bundle()["previous_audit"]
+        self.assertEqual(p["changed_since"], {"scope": {"before": "here", "after": "chignolin only"}})
+        self.assertIn("## Its latest audit", self.ok("audit", c))
+        a2 = self.audit(c)
+        p = bundle()["previous_audit"]
+        self.assertEqual((p["id"], p["changed_since"]), (a2, {}))
+
+    def test_numbers_not_in_cited_results(self):
+        d = self.d
+        e2, _ = self.new_exp(d["h"], result=False, title="E2 at lr 0.003")
+        mfile = Path(self.repo) / "m.json"
+        mfile.write_text(json.dumps({"jsd_tp": 0.25912, "frac_closed": 0.88, "nested": {"rho": -0.021}}))
+        r = self.ok("result", e2, "jsd_tp 0.259 on villin; 512 samples", "--metrics", str(mfile))
+        r2 = self.ok("result", e2, "seed 2 gave jsd_tp 0.301")
+        c = self.add("conclusion", "Run 13 reaches 0.26 where the baseline had 0.301",
+                     "--rationale", "jsd_tp 0.259, rho -0.02, 88% closed, range 0.20-0.26; spread 0.01; lr 0.003; "
+                                    "30000 steps of run 13",
+                     "--scope", "villin", "--alternatives", "noise of 0.05", "--from", r)
+        got = json.loads(self.ok("audit", c, "--json"))["checks"]["numbers_not_in_cited_results"]
+        self.assertEqual([(m["number"], m["field"]) for m in got],
+                         [("0.301", "title"), ("0.20", "rationale"), ("0.01", "rationale"), ("0.003", "rationale")])
+        found = {m["number"]: m["found"] for m in got}
+        self.assertEqual(found["0.301"], "only in uncited results: " + r2)
+        self.assertEqual(found["0.01"], "nowhere in the bundle")
+        self.assertIn("spec", found["0.003"])
+        self.assertIn("## Computed by nb", self.ok("audit", c))
 
 
 class TestClosingLint(SnapCase):

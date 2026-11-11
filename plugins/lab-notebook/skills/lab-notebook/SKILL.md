@@ -120,8 +120,30 @@ run the `nb-auditor` agent (`lab-notebook:nb-auditor`; pass the model from
 not pass it the conversation. Record
 what it returns with `nb add audit --of <id> --verdict ... --findings ...
 --auditor nb-auditor/<model>`, then tell the user the verdict and findings in
-words. If the audit finds problems, fix the draft with the user (a changed
-draft is re-audited) or let them reject it.
+words.
+
+Findings are errors or notes. `sound` means no errors.
+
+- **Errors** (a number no cited result holds, a statement that disagrees
+  with a verdict or with an uncited result, a scope wider than the data,
+  changed user words): fix the draft with the user, or let them reject it.
+  Change only what the error names. A changed draft needs a re-audit: run
+  `nb audit <id>` again and pass the new bundle, which now holds the previous
+  findings and what changed, so the auditor checks only those.
+- **Notes** (a missing alternative, a two-claim title, an unlinked result):
+  report them to the user and leave the draft alone unless they ask for a
+  change. Each edit costs a re-audit.
+
+Stop after one re-audit. If errors remain, show them to the user and let
+them decide: fix again, confirm with the audit on record, or reject.
+
+Keep a draft short so the audit has less to question. The title is the one
+claim. The rationale gives the evidence (the numbers, each from a cited
+result) and how the verdicts came out, in a few sentences. Limits go in
+`--scope` and other explanations in `--alternatives`, not in the rationale.
+`nb audit <id>` lists, under "Computed by nb", every decimal and percentage
+in your draft that no cited result holds; look at it before you run the
+auditor and cite the missing result or drop the number.
 
 **Confirming.** `nb show <id>` lists the open questions a conclusion
 answers. Ask the user which to mark answered, then run `nb confirm <id>

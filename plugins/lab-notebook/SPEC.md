@@ -156,7 +156,7 @@ An ambiguous prefix is an error that lists the matches.
 |---|---|---|
 | `id` | string | Required. See [IDs](#ids). Unique. |
 | `type` | string | Required. One of the types below. |
-| `title` | string | Required, one line. For claims (hypothesis, conclusion, lead, decision) the title is the claim itself. A conclusion or lead makes **one claim**: something that could be true or false on its own. "A, but B, so C" is three conclusions. Not enforced by `nb` (it cannot tell); the auditor checks it. |
+| `title` | string | Required, one line. For claims (hypothesis, conclusion, lead, decision) the title is the claim itself. A conclusion or lead makes **one claim**: something that could be true or false on its own. "A, but B, so C" is three conclusions. The rule applies to the title; the rationale, scope and alternatives may hold several statements. Not enforced by `nb` (it cannot tell); the auditor reports it as a note. |
 | `author` | `user` \| `claude` | Required. Set by `nb`, never by a flag. |
 | `created`, `updated` | date | Required. Set by `nb`. |
 | `status` | string | Required for every type except `audit`. Allowed values per type below. |
@@ -350,11 +350,13 @@ CLI.
   `frozen` if invalidation withdraws one of its verdicts (logged).
 - **Audits** are immutable once added. An audit never changes the audited
   conclusion or lead; a `concerns` or `unsound` verdict appears in `prime` and
-  `lint` for the user to act on; only the latest audit of a node counts. While
+  `lint` for the user to act on; only the latest audit of a node counts. A
+  `sound` audit may carry notes but no `error:` finding (`nb add audit`
+  refuses that). While
   `audit_before_confirm` is on, a Claude-authored conclusion or lead cannot be
   confirmed unless its latest audit is **current**: the node's own fields,
-  other than `tags`, `refs` and `log`, are unchanged since that audit's
-  `audited_at`.
+  other than `tags`, `refs`, `log`, `status` and `confirmed_at`, are unchanged
+  since that audit's `audited_at`.
 - **Unlinking** is allowed only while the source node is in its initial
   status (draft, open, pending), and never for the required links above.
   A mistaken `supports` or `contradicts` link on any node (a result, an
@@ -538,6 +540,16 @@ res-d148  Run 17: run 16 with 10k steps ...     hyp-qc5b refuted     unreviewed
 `nb audit <con|lead>` prints the bundle an auditor needs, and nothing else:
 
 - the node, including `origin` and `user_words`;
+- its latest audit, if it has one (verdict, findings), and each field changed
+  since that audit with its value before and after;
+- computed checks: each decimal and percentage in the title, rationale and
+  scope that no cited result holds (summary, metrics, verdict bases), and
+  where else in the bundle it appears (an experiment's title, spec,
+  predictions or deviations; an uncited result; nowhere). A number matches if
+  it agrees after rounding to the precision the claim gives; a percentage also
+  matches a fraction. Plain integers are not checked. A difference or ratio
+  the author computed is listed as found nowhere, and the auditor checks the
+  arithmetic;
 - every result it rests on, with summary, metrics and provenance;
 - for each of those results, its experiment's frozen spec, predictions,
   decision rules, verdicts and deviations;
@@ -549,22 +561,47 @@ res-d148  Run 17: run 16 with 10k steps ...     hyp-qc5b refuted     unreviewed
 
 The **auditor** is a subagent (`agents/nb-auditor.md`) with read-only tools
 (`nb show`, `context`, `brief`, `audit`, `query` and file reads for artifacts).
-It is given only the bundle, never the conversation, and it checks:
+It is given only the bundle, never the conversation. Each finding is an
+**error** or a **note**, and the verdict depends on errors only.
 
-| Check | Question |
+An error is one of these, with something in the bundle to point to:
+
+| Check | It is an error when |
 |---|---|
-| backed | Is every number and claim in the title and rationale in a cited result? |
-| rule-faithful | Do claims about hypotheses match the verdicts and the frozen rules? For a retrospective experiment, was the rule plausibly not fitted to the result? |
-| scoped | Is the claim no broader than the data (`scope`)? |
-| one claim | Is it one claim? |
-| complete | Are uncited results of the same experiments, invalidated results and deviations accounted for? Searching the notebook itself (`nb query --text`), is there a relevant result the node ignores because it is not linked? Report it as a missing link. |
-| consistent | Does it contradict a supported conclusion or a later result? |
-| alternatives | Are obvious alternatives missing from `alternatives`? |
-| faithful | For `origin: user`: does the draft add, drop or shift anything relative to `user_words`? |
+| backed | A number or measured fact in the title, rationale or scope is in no cited result and cannot be computed from numbers that are. The auditor starts from the bundle's computed checks. |
+| rule-faithful | A statement about a hypothesis, verdict or rule disagrees with the recorded verdicts or the frozen rule, or a verdict's basis is not in its result. |
+| complete | An uncited result (in the bundle, or found with `nb query --text`), a deviation or an invalidated result contradicts the title's claim or a statement in the rationale. |
+| scoped | The title or `scope` claims proteins, runs or settings the cited results do not cover. |
+| consistent | The claim contradicts a supported conclusion or a later result, and the node does not say so. |
+| faithful | For `origin: user`: the draft changes what `user_words` says, or adds something not marked as Claude's. |
 
-It returns a verdict (`sound`, `concerns`, `unsound`) and findings, one line
-per failed check. Claude records them with `nb add audit` (not gated: an
-audit only adds a warning). The auditor's model is `auditor_model`.
+Everything else is a note, at most three per audit: an alternative
+explanation missing from `alternatives` (always a note, because the list of
+possible alternatives has no end), a title that states more than one claim,
+a relevant result that is not linked and does not contradict the claim, a
+retrospective rule that looks fitted to its result, a number that appears
+only in a spec. The auditor does not comment on wording.
+
+| Verdict | Meaning |
+|---|---|
+| `sound` | No errors. There may be notes. |
+| `concerns` | One or more errors that an edit could fix. |
+| `unsound` | The evidence does not support the claim, or the claim contradicts its results, the frozen rule or a supported conclusion. |
+
+So a lint warning on an audit means the audit found an error. Audits
+recorded before this split (findings with no `error:` or `note:` marks) used
+`concerns` for any failed check; re-audit a claim to bring its warning up to
+date.
+
+A **re-audit** is an audit of a node that changed since its latest audit
+(the bundle's `changed_since` is not empty). The auditor then checks two
+things only: whether the edit fixed each error in the previous findings, and
+whether the changed fields hold a new error. It raises no new notes on text
+that did not change.
+
+Findings are one line each, `- error: <check>: ...` or `- note: <check>:
+...`. Claude records them with `nb add audit` (not gated: an audit only adds
+a warning). The auditor's model is `auditor_model`.
 
 `nb` cannot launch a subagent. It enforces only that a current audit exists
 before `nb confirm` on a Claude-authored conclusion or lead

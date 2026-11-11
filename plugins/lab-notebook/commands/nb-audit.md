@@ -24,6 +24,7 @@ Targets: $ARGUMENTS
    confirmed one, citing the other's id in the findings.
 6. Report to the user in words, not bare ids: how many claims were audited,
    then every `concerns` or `unsound` verdict with the claim's title, its id
-   after the title, and the findings. Say what the user could do about each
+   after the title, and its errors. `sound` means no errors; list the notes
+   on sound claims briefly at the end. Say what the user could do about each
    (narrow the claim, supersede it, mark it refuted), and do nothing about it
    yourself.

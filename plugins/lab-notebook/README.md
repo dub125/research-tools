@@ -41,7 +41,7 @@ The notebook is a graph of typed entries. Each has a short id such as
 | conclusion | An interpretation of results. One claim each, with its scope and the alternatives considered. |
 | lead | Something worth following up, suggested by a result. |
 | decision | A choice the project made, with what it was based on and what was rejected. |
-| audit | An independent check of a conclusion or lead against its evidence. |
+| audit | An independent check of a conclusion or lead against its evidence: a verdict, plus findings marked as errors or notes. |
 
 The notebook keeps two kinds of knowledge apart.
 
@@ -146,6 +146,17 @@ Each result goes through three steps.
    conversation. By default `nb confirm` refuses a draft that has no audit or
    that changed since its audit. `/nb-audit` runs the same check over every
    supported conclusion.
+
+   The auditor marks each finding as an error or a note. An error is
+   something wrong that it can point to: a number that no cited result
+   holds, a statement that disagrees with a verdict or with an uncited
+   result, a scope wider than the data. A note is anything else worth
+   knowing, such as an alternative explanation the draft leaves out. The
+   verdict is `sound` when there are no errors, so `nb lint` warns only about
+   claims with an error. `nb audit` itself lists the numbers in a draft that
+   no cited result holds. When a draft changes after an audit, the next audit
+   checks only whether the errors were fixed and whether the change added new
+   ones.
 
 The freeze gate is optional (`nb config set freeze_gate true`, off by
 default). While it is on, `nb` refuses a freeze if any result is unreviewed
